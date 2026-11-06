@@ -1,0 +1,2 @@
+<?xml version='1.0' encoding='utf-8'?>
+<hierarchy><node package="com.eg.android.AlipayGphone" bounds="[0,0][1080,2400]"><node text="芭芭农场" class="android.widget.TextView" package="com.eg.android.AlipayGphone" content-desc="" clickable="false" enabled="true" bounds="[467,1479][611,1521]" /></node></hierarchy>
