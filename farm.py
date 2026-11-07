@@ -42,12 +42,17 @@ ALIPAY_TASKS = {
         r"^\s*(?:逛好物|浏览好物)立得\d+肥料当前进度(\d+)，总进度(\d+)")),
     "goodies": ("逛好物最高得肥料", re.compile(
         r"^\s*逛好物最高得\d+肥料当前进度(\d+)，总进度(\d+)")),
+    "featured": ("看精选商品得肥料", re.compile(
+        r"^\s*看精选商品得肥料当前进度(\d+)，总进度(\d+)")),
     "saving": ("逛一逛省钱会场", SAVING_TASK),
     "insurance": ("搜一搜「车险」", re.compile(
         r"^\s*搜一搜[「“\"]车险[」”\"]当前进度(\d+)，总进度(\d+)")),
 }
 SAVING_PROGRESS = re.compile(r"点3个商品，得1000肥料[（(](\d+)/(\d+)[）)]")
 MAX_TASK_ROUNDS = 100  # 只限制任务尝试次数，不限制完成后的最终列表检查。
+MAX_GOODIES_CARDS = 10  # 奖励现身卡片每张100，最多核验10张，不按点击动作推算到账。
+MAX_CARD_SCAN_SWIPES = 30
+MAX_CARD_IDLE_SWIPES = 6
 
 
 class TaskUnavailable(RuntimeError):
@@ -384,9 +389,25 @@ class Page:
                 return {"stages": [], "claimed": 0, "all_claimed": True,
                         "completed": True, "completion": "今日任务已完成"}
         if not self.has("滑动浏览或查看商品得肥料"):
+            # 新版将分段栏改为单个计时横幅；金额和状态须与导航标题同属一栏。
+            for title in self.nodes:
+                if title.get("text") != "浏览得奖励":
+                    continue
+                header = self.parents.get(title)
+                texts = [n.get("text", "") for n in header] if header is not None else []
+                amounts = [int(s) for s in texts if s.isdecimal()]
+                countdown = next((m for s in texts
+                                  if (m := re.fullmatch(r"滑动浏览(\d+)秒得肥料", s))), None)
+                claimed = "已获得肥料" in texts
+                if len(amounts) == 1 and (countdown is not None or claimed):
+                    status = "已领取" if claimed else f"{countdown[1]}s后领取"
+                    return {"stages": [{"amount": amounts[0], "status": status, "claimed": claimed}],
+                            "claimed": int(claimed), "all_claimed": claimed,
+                            "completed": False, "completion": None, "layout": "single"}
             return None
         label = next((n for n in self.nodes
-                      if re.fullmatch(r"每浏览\d+秒可得1次奖励", n.get("text", ""))), None)
+                      if re.fullmatch(r"每浏览\d+秒可得1次奖励", n.get("text", ""))
+                      or n.get("text") == "已领取全部奖励"), None)
         panel = self.parents.get(label) if label is not None else None
         if panel is None:
             return None
@@ -407,6 +428,42 @@ class Page:
         return {"stages": stages, "claimed": sum(s["claimed"] for s in stages),
                 "all_claimed": all(s["claimed"] for s in stages),
                 "completed": False, "completion": None}
+
+    def goodies_cards(self):
+        """只识别浏览页中成对的奖励卡片文字，保留已领取卡片供逐卡核验和去重。"""
+        state = self.goodies_state()
+        if state is None:
+            return []
+        # 新版导航横幅实际固定在顶部；若 XML 把它滚到屏外，卡片坐标也可能
+        # 整体错位，即使某张卡片坐标为正也不能据此点击相邻商品。
+        coordinates_valid = state.get("layout") != "single" or any(
+            n.get("text") == "浏览得奖励" and self.task_tappable(n) for n in self.nodes)
+        cards = []
+        for label in self.nodes:
+            pending = label.get("text") == "奖励现身，点我"
+            claimed = label.get("text") == "已得肥料100"
+            if not (pending or claimed):
+                continue
+            parent = self.parents.get(label)
+            if parent is None:
+                continue
+            # 实测标签与操作文字是同一小容器的直接子节点，均可能标为不可点击。
+            texts = [n.get("text", "") for n in parent]
+            expected = "立即领" if pending else "已领取"
+            if len([s for s in texts if s]) != 2 or expected not in texts:
+                continue
+            button = next(n for n in parent if n.get("text") == expected)
+            path = []
+            current = parent
+            while current in self.parents:
+                ancestor = self.parents[current]
+                path.append(list(ancestor).index(current))
+                current = ancestor
+            # 使用结构位置而非屏幕坐标，滚动和领取文案变化不会产生新的身份。
+            cards.append({"id": tuple(reversed(path)), "claimed": claimed,
+                          "amount": 100, "button": button, "label": label,
+                          "coordinates_valid": coordinates_valid})
+        return cards
 
     def instant_state(self):
         """读取单次浏览任务的专属浮标，忽略商品广告中的肥料和发放文案。"""
@@ -860,6 +917,7 @@ class Runner:
         """only 可限定一条任务身份，供当前页实机验证使用，不连带执行其他任务。"""
         if self.app == "alipay":
             for key, handler in (("goodies", self.execute_goodies),
+                                 ("featured", self.execute_featured),
                                  ("instant", self.execute_instant),
                                  ("insurance", self.execute_insurance), ("saving", self.execute_saving)):
                 try:
@@ -1023,8 +1081,25 @@ class Runner:
         self.event("任务完成", **result)
         return page
 
+    def claim_goodies_card(self, page, card):
+        """点击一张已验证卡片，仅在同一结构位置变成100肥料已领取时确认成功。"""
+        self.event("领取现身卡片", card_id=card["id"], bounds=card["button"].get("bounds"))
+        self.adb.tap(card["button"])
+        for _ in range(3):
+            page = self.perceive()
+            if page.goodies_state() is None:
+                raise RuntimeError("领取现身卡片后离开已验证的浏览奖励页面")
+            after = next((c for c in page.goodies_cards() if c["id"] == card["id"]), None)
+            if after is not None and after["claimed"]:
+                reward = {"card_id": card["id"], "amount": 100,
+                          "evidence": "奖励现身，点我/立即领 → 已得肥料100/已领取"}
+                self.event("现身卡片奖励已核验", **reward)
+                return page, reward
+            time.sleep(0.3)
+        raise RuntimeError("现身卡片点击后未确认100肥料已领取，不重复点击、不记为成功")
+
     def browse_goodies(self, page):
-        """滑动推进分段奖励；只接受面板“已领取”，不点商品或其他活动领奖。"""
+        """滑动推进浏览奖励，扫描并逐张核验现身卡片，不点击商品或其他活动领奖。"""
         initial = page.goodies_state()
         if initial is None:
             raise RuntimeError("未识别到逛好物分段奖励面板")
@@ -1035,11 +1110,46 @@ class Runner:
         stage_count = len(initial["stages"])
         observed_claimed = initial["claimed"]
         reward_stages = initial["stages"]
+        card_ids = set()
+        seen_cards = set()
+        new_card_rewards = []
+        scan_cards = initial.get("layout") == "single"
+        card_scan_swipes = 0
+        card_idle_swipes = 0
+
+        def finish(reason):
+            """分别记录本次已核验的计时奖励与卡片奖励，不推算未领取的金额。"""
+            return page, {"reward_stages": reward_stages, "new_rewards": new_rewards,
+                          "claimed_before": initial["claimed"], "claimed_after": observed_claimed,
+                          "completion": state["completion"], "new_card_rewards": new_card_rewards,
+                          "card_claims": len(new_card_rewards),
+                          "card_reward_amount": sum(r["amount"] for r in new_card_rewards),
+                          "cards_claimed_observed": len(card_ids), "cards_stop_reason": reason}
+
         while time.monotonic() < deadline:
             state = page.goodies_state()
             if state is None:
                 raise RuntimeError("逛好物浏览中离开已验证的奖励页面")
             self.event("逛好物奖励状态", **state)
+            cards = page.goodies_cards()
+            scan_cards = scan_cards or bool(cards)
+            card_ids.update(c["id"] for c in cards if c["claimed"])
+            discovered = {c["id"] for c in cards} - seen_cards
+            seen_cards.update(c["id"] for c in cards)
+            if discovered:
+                card_idle_swipes = 0
+            if len(card_ids) < MAX_GOODIES_CARDS:
+                card = next((c for c in cards if not c["claimed"] and c["id"] not in card_ids
+                             and c["coordinates_valid"]
+                             and page.task_tappable(c["button"]) and page.task_tappable(c["label"])), None)
+                if card is not None:
+                    page, reward = self.claim_goodies_card(page, card)
+                    card_ids.add(card["id"])
+                    new_card_rewards.append(reward)
+                    card_idle_swipes = 0
+                    deadline = time.monotonic() + self.timeout
+                    # 下一次循环仍与点击前的分段快照对比，不遗漏点击期间自动发放的奖励。
+                    continue
             stage_count = max(stage_count, len(state["stages"]))
             observed_claimed = max(observed_claimed, state["claimed"])
             if state["stages"]:
@@ -1056,16 +1166,93 @@ class Runner:
             if state["completed"] or (state["all_claimed"] and len(state["stages"]) == stage_count):
                 stable_done = stable_done + 1 if state == previous else 1
                 if stable_done >= 2:
-                    return page, {"reward_stages": reward_stages, "new_rewards": new_rewards,
-                                  "claimed_before": initial["claimed"], "claimed_after": observed_claimed,
-                                  "completion": state["completion"]}
+                    stop = ("未出现现身卡片" if not scan_cards else
+                            "已确认10张卡片领取" if len(card_ids) >= MAX_GOODIES_CARDS else
+                            "达到卡片扫描次数上限" if card_scan_swipes >= MAX_CARD_SCAN_SWIPES else
+                            "连续滑动未发现新卡片" if card_idle_swipes >= MAX_CARD_IDLE_SWIPES else None)
+                    if stop is not None:
+                        self.event("现身卡片扫描结束", reason=stop, confirmed=len(card_ids),
+                                   new_claims=len(new_card_rewards))
+                        return finish(stop)
+                    self.adb.swipe(page)
+                    card_scan_swipes += 1
+                    card_idle_swipes += 1
                 time.sleep(0.5)
             else:
                 stable_done = 0
                 self.adb.swipe(page)
             previous = state
             page = self.perceive()
+        if stable_done >= 2 and scan_cards:
+            self.event("现身卡片扫描结束", reason="达到扫描时间上限", confirmed=len(card_ids),
+                       new_claims=len(new_card_rewards))
+            return finish("达到扫描时间上限")
         raise RuntimeError("逛好物浏览超时，奖励面板未确认全部已领取")
+
+    def execute_featured(self, page):
+        """核验精选商品的分段奖励和农场多次进度；每轮重新读取，不按入口点击次数记成功。"""
+        for attempt in range(MAX_TASK_ROUNDS):
+            row = next((r for r in page.task_rows() if r["key"] == "featured"), None)
+            if row is None:
+                if attempt == 0:
+                    self.event("跳过任务", task=ALIPAY_TASKS["featured"][0], reason="任务未出现")
+                return page
+            button_text = row["button"].get("text") if row["button"] is not None else None
+            if row["current"] >= row["total"] or button_text in ("已领取", "已完成"):
+                if row["current"] == row["total"] and button_text == "领取":
+                    return self.claim_alipay(page, "featured", row["current"], button_text, allow_removed=True)
+                return page
+            page, row = self.reveal(page, row)
+            if row["button"].get("text") != "去完成":
+                raise TaskUnavailable("精选商品任务未找到去完成按钮", page)
+            self.event("进入任务", task=row["name"], before=row["current"], total=row["total"],
+                       button_before=button_text)
+            self.adb.tap(row["button"])
+            browse_page = self.wait_page(lambda p: p.goodies_state() is not None, "精选商品浏览奖励页面")
+            _, details = self.browse_goodies(browse_page)
+            page = self.return_list()
+            after = self.task_row(page, row)
+            # 返回页可能异步更新；不重新点击入口，先重读两次核对进度。
+            for retry in range(2):
+                if after is not None and after["current"] > row["current"]:
+                    break
+                if after is None and row["current"] == row["total"] - 1:
+                    break
+                self.event("重新核对精选商品任务", before=row["current"], attempt=retry + 1)
+                time.sleep(0.5)
+                page = self.perceive()
+                if not page.task_list:
+                    raise RuntimeError("核对精选商品进度时离开任务列表")
+                after = self.task_row(page, row)
+            if after is None:
+                if row["current"] != row["total"] - 1:
+                    snapshot = self.directory / f"featured-unmatched-{time.time_ns()}.xml"
+                    snapshot.write_bytes(ET.tostring(page.root, encoding="utf-8"))
+                    raise RuntimeError("精选商品任务未到最后一次却消失，未确认完成；已保存XML")
+                time.sleep(0.5)
+                page = self.perceive()
+                if not page.task_list or self.task_row(page, row) is not None:
+                    raise RuntimeError("精选商品任务移除状态未稳定")
+                current, after_button = row["total"], "任务已移除"
+                evidence = "分段奖励完成，返回农场后最后一次任务连续两次移除"
+            else:
+                current = after["current"]
+                if not row["current"] < current <= row["total"]:
+                    raise RuntimeError("精选商品浏览奖励已完成，但农场任务进度未增加或异常")
+                after_button = after["button"].get("text") if after["button"] is not None else None
+                if current == row["total"] and after_button == "领取":
+                    return self.claim_alipay(page, "featured", row["current"], button_text,
+                                             allow_removed=True, **details)
+                evidence = "分段奖励完成，返回农场核验任务进度增加"
+            result = {"key": "featured", "task": row["name"], "before": row["current"],
+                      "after": current, "total": row["total"], "button_before": button_text,
+                      "button_after": after_button, **details, "evidence": evidence,
+                      "reward_messages": [s for s in page.texts if "到账" in s]}
+            self.results.append(result)
+            self.event("任务完成", **result)
+            if current == row["total"]:
+                return page
+        raise RuntimeError("精选商品任务达到执行次数上限，仍有待执行进度")
 
     def execute_goodies(self, page):
         row = next((r for r in page.task_rows() if r["key"] == "goodies"), None)
@@ -1087,7 +1274,7 @@ class Runner:
         initial = page.goodies_state()
         page, details = self.browse_goodies(page)
         page = self.return_list()
-        if initial["all_claimed"]:
+        if initial["all_claimed"] and not details.get("new_card_rewards"):
             self.event("跳过任务", task=row["name"], reason="浏览页今日任务此前已完成或奖励已全部领取")
             return page
         after = self.task_row(page, row)
@@ -1103,7 +1290,8 @@ class Runner:
                 raise RuntimeError("逛好物返回后任务移除状态未稳定")
         else:
             raise RuntimeError("逛好物奖励已领取，但农场任务进度未完成")
-        if row["current"] >= row["total"] and not details["new_rewards"]:
+        if (row["current"] >= row["total"] and not details["new_rewards"]
+                and not details.get("new_card_rewards")):
             self.event("跳过任务", task=row["name"], reason="农场此前已完成，未观察到本次新增分段奖励")
             return page
         result = {"key": "goodies", "task": row["name"], "before": row["current"],
