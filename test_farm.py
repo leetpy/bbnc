@@ -19,6 +19,35 @@ def make_page(name="看严选推荐商品", current=3, total=6):
 
 
 class FarmTests(unittest.TestCase):
+    def test_real_single_round_tasks_have_distinct_reward_identity(self):
+        # 实机同时出现两条单次任务；改名和滚动后仍必须匹配各自奖励。
+        page = Page((Path(__file__).parent / "tests/fixtures/taobao-single-round-tasks.xml").read_text())
+        rows = page.task_rows()
+        for row in rows:
+            self.assertIs(Runner.task_row(page, row)["title"], row["title"])
+
+    def test_same_total_tasks_continue_after_title_change(self):
+        # 第一条完成后，第二条改成同名任务；调度不能因次数相同漏做它。
+        xml = (Path(__file__).parent / "tests/fixtures/taobao-single-round-tasks.xml").read_text()
+        before = Page(xml)
+        middle = Page(xml.replace("发现精选好物(0/1)", "发现精选好物(1/1)")
+                      .replace("搜一搜你喜欢的商品(0/1)", "发现精选好物(0/1)"))
+        after = Page(xml.replace("发现精选好物(0/1)", "发现精选好物(1/1)")
+                     .replace("搜一搜你喜欢的商品(0/1)", "搜一搜你心仪的宝贝(1/1)"))
+        with tempfile.TemporaryDirectory() as directory, patch("farm.time.sleep"), \
+                patch.object(Page, "task_tappable", return_value=True):
+            adb = Mock()
+            runner = Runner(adb, Path(directory), 10)
+            # 此回归只验证任务身份和调度，滚动与浏览由各自用例覆盖。
+            runner.reveal = lambda page, row: (page, runner.task_row(page, row))
+            runner.browse = Mock()
+            runner.perceive = Mock(return_value=before)
+            runner.return_list = Mock(side_effect=[middle, after])
+            runner.execute(before)
+            self.assertEqual(len(runner.results), 2)
+            self.assertEqual(adb.tap.call_count, 2)
+            self.assertEqual(runner.results[1]["task_after"], "搜一搜你心仪的宝贝")
+
     def test_healthy_xml_runtime_does_not_switch_interpreter(self):
         with patch("farm.subprocess.run") as probe, patch("farm.os.execv") as execute:
             ensure_xml_runtime()

@@ -28,7 +28,13 @@ TASKS = {
     "selected": ("看严选推荐商品", "发现精选好物", "搜一搜你心仪的宝贝", "搜一搜你喜欢的商品"),
     "browse15": ("逛精选好物",),
     "gift": ("领肥料礼包",),
+    "coins": (),  # 活动金额会变化，下面用限定格式识别标题。
+    "ip": ("天天签到免费拿IP周边",),
+    "domestic": ("浏览国货严选红包抵扣",),
+    "saving_card": ("去省钱卡领红包",),
+    "takeaway": ("领百亿外卖红包",),  # 实测为5秒浏览任务，复用浏览及返回核验流程。
 }
+COINS_TASK = re.compile(r"^双11来淘金币狂享\d+(?:\.\d+)?[亿万]$")
 PROGRESS = re.compile(r"^(.+?)[(（](\d+)/(\d+)[)）]$")
 SAVING_TASK = re.compile(r"^\s*逛一逛省钱会场当前进度(\d+)，总进度(\d+)")
 ALIPAY_TASKS = {
@@ -147,7 +153,7 @@ class Page:
         if self.package == APPS["alipay"]["package"]:
             return self.in_app and self.has("做任务集肥料") and self.has("关闭做任务集肥料弹窗")
         return self.has("肥料明细") and any(
-            n.get("text") in ("去完成", "去领取", "去开启", "已领取", "已完成")
+            n.get("text") in ("去完成", "去逛逛", "去领取", "去开启", "已领取", "已完成")
             or re.fullmatch(r"\d+点可领", n.get("text", "")) for n in self.nodes
         )
 
@@ -183,6 +189,43 @@ class Page:
         return next((n for n in self.nodes if n.get("text") == text
                      and self.visible(n)), None)
 
+    def task_tappable(self, node):
+        """任务入口须在父容器裁剪区域内，且点击中心不被推广横幅覆盖。"""
+        if node is None or not self.visible(node) or node.get("enabled") == "false":
+            return False
+        x1, y1, x2, y2 = bounds(node)
+        parent = self.parents.get(node)
+        while parent is not None:
+            left, top, right, bottom = bounds(parent)
+            # 缺失 bounds 的结构节点不提供裁剪信息。
+            if right > left and bottom > top and not (
+                    left <= x1 < x2 <= right and top <= y1 < y2 <= bottom):
+                return False
+            parent = self.parents.get(parent)
+        # 淘宝 WebView 偶尔将整个 ListView 报到面板上方；其子节点即使
+        # 落在屏幕内也可能属于其他行。拒绝整棵异常列表，不能继续按旧坐标点。
+        parent = self.parents.get(node)
+        while parent is not None:
+            if parent.get("class") == "android.widget.ListView":
+                left, top, right, bottom = bounds(parent)
+                ancestor = self.parents.get(parent)
+                while ancestor is not None:
+                    aleft, atop, aright, abottom = bounds(ancestor)
+                    # 列表底部可能正常越出视口或存在 1px 取整差；这里只拒绝
+                    # 已实测会造成整列错位的顶部越界，而非要求列表完整露出。
+                    if aright > aleft and abottom > atop and top < atop - 2:
+                        return False
+                    ancestor = self.parents.get(ancestor)
+            parent = self.parents.get(parent)
+        x, y = (x1 + x2) / 2, (y1 + y2) / 2
+        for overlay in self.nodes:
+            if overlay.get("content-desc") != "跳转链接" or overlay.get("clickable") != "true":
+                continue
+            left, top, right, bottom = bounds(overlay)
+            if left <= x <= right and top <= y <= bottom:
+                return False
+        return True
+
     def entry(self, label):
         return next((n for n in self.nodes
                      if n.get("package") == self.package
@@ -215,6 +258,8 @@ class Page:
                 continue
             name, current, total = match.groups()
             key = next((key for key, aliases in TASKS.items() if name in aliases), None)
+            if key is None and COINS_TASK.fullmatch(name):
+                key = "coins"
             if key is None:
                 continue
             # 实测单次“逛精选好物”也会改名为搜索/推荐商品；按同一任务族和总次数归一。
@@ -229,13 +274,17 @@ class Page:
                 if len(titles) > 1:
                     break
                 button = next((n for n in parent.iter("node")
-                               if (n.get("text") in ("去完成", "已完成", "去领取", "已领取")
+                               if (n.get("text") in ("去完成", "去逛逛", "已完成", "去领取", "已领取")
                                    or re.fullmatch(r"\d+点可领", n.get("text", "")))
                                and n.get("clickable") == "true"), None)
                 if button is not None:
                     break
                 parent = self.parents.get(parent)
+            # 奖励必须来自标题与按钮的最小共同容器，不能取相邻任务的金额。
+            rewards = [n.get("text") for n in parent.iter("node")
+                       if re.fullmatch(r"\+\d+", n.get("text", ""))] if button is not None else []
             rows.append({"key": key, "name": name, "current": int(current),
+                         "reward": rewards[0] if len(rewards) == 1 else None,
                          "total": int(total), "title": node, "button": button})
         return rows
 
@@ -299,6 +348,17 @@ class Page:
         return self.insurance_search and "肥料奖励" in self.texts and "已发放" in self.texts
 
     def browse_state(self):
+        # 国货严选浏览奖励实测直接弹出到账面板，不一定出现通用“任务完成”。
+        # 三条信号必须同属一个面板，避免把商品广告中的下单奖励当成完成。
+        if self.taobao:
+            for node in self.nodes:
+                if not re.fullmatch(r"\d+肥料已到账", node.get("text", "")):
+                    continue
+                parent = self.parents.get(node)
+                texts = [n.get("text", "") for n in parent] if parent is not None else []
+                if (any(re.fullmatch(r"本页下单再得\d+肥料", s) for s in texts)
+                        and any(re.fullmatch(r"\d+s后奖励消失", s) for s in texts)):
+                    return "done"
         # 购买文案仅作为浏览完成信号，绝不点击。
         if self.has("当前页下单") or self.has("当前页面下单") or self.has("任务完成"):
             return "done"
@@ -684,7 +744,7 @@ class Runner:
             state = page.browse_state()
             self.event("浏览状态", state=state,
                        signals=[s for s in page.texts
-                                if re.search(r"滑动浏览|当前页.*下单|任务完成|立即下单.*肥料", s)])
+                                if re.search(r"滑动浏览|当前页.*下单|任务完成|立即下单.*肥料|肥料已到账|本页下单再得|奖励消失", s)])
             if state == "done":
                 return
             if state == "unknown" and isinstance(self.adb, ADB):
@@ -734,7 +794,7 @@ class Runner:
                 if fresh is None:
                     raise TaskUnavailable(f"定位期间任务未出现：{row['name']}", page)
                 button = fresh["button"]
-                if button is not None and page.visible(button) and page.visible(fresh["title"]):
+                if page.task_tappable(button) and page.task_tappable(fresh["title"]):
                     return page, fresh
                 self.event("滚动定位任务", task=row["name"], direction="down" if down else "up")
                 if isinstance(self.adb, ADB) and not self.adb.use_live_ui:
@@ -750,10 +810,15 @@ class Runner:
 
 
     @staticmethod
+    def task_identity(row):
+        """用任务族、总次数和行内奖励区分任务，允许任务标题随浏览变化。"""
+        return row["key"], row["total"], row.get("reward")
+
+    @staticmethod
     def task_row(page, row):
-        # 同一列表可能同时有 18 次、5 次的同名推荐任务，以总次数区分身份。
+        # 总次数相同的真实任务也可能并存；奖励缺失时仍严格拒绝歧义。
         matches = [r for r in page.task_rows()
-                   if (r["key"], r["total"]) == (row["key"], row["total"])]
+                   if Runner.task_identity(r) == Runner.task_identity(row)]
         if len(matches) > 1:
             raise RuntimeError("任务身份不唯一，停止匹配以免串任务")
         return matches[0] if matches else None
@@ -810,7 +875,7 @@ class Runner:
             candidates = [r for r in page.task_rows()
                           if r["current"] < r["total"]
                           and (only is None or (r["key"], r["total"]) == only)
-                          and (r["key"], r["total"], r["current"]) not in attempted]
+                          and (*self.task_identity(r), r["current"]) not in attempted]
             if not candidates:
                 for gift in (r for r in page.task_rows() if r["key"] == "gift"
                              and r["current"] >= r["total"]):
@@ -824,7 +889,7 @@ class Runner:
                 raise RuntimeError("达到执行次数上限，列表仍有待执行任务")
             rounds += 1
             row = candidates[0]
-            attempted.add((row["key"], row["total"], row["current"]))
+            attempted.add((*self.task_identity(row), row["current"]))
             if row["key"] == "gift":
                 try:
                     page = self.claim_gift(page, row)
@@ -839,7 +904,7 @@ class Runner:
                 self.event("跳过任务", task=row["name"], reason=str(exc))
                 continue
             button = row["button"]
-            if button is None or not page.visible(button) or not page.visible(row["title"]):
+            if not page.task_tappable(button) or not page.task_tappable(row["title"]):
                 raise RuntimeError(f"任务入口不可见：{row['name']}；请将列表滚到顶部")
             self.event("进入任务", task=row["name"], before=row["current"], total=row["total"],
                        bounds=button.get("bounds"))
