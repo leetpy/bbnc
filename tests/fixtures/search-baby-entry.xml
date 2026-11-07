@@ -1,0 +1,21 @@
+<?xml version='1.0' encoding='utf-8'?>
+<hierarchy>
+  <node package="com.taobao.taobao" bounds="[0,0][1260,2800]">
+    <node index="2" text="搜索有福利" resource-id="" class="android.view.View" package="com.taobao.taobao" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[124,170][388,281]" drawing-order="0" hint="" />
+    <node index="4" text="搜索后浏览立得奖励" resource-id="" class="android.widget.TextView" package="com.taobao.taobao" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[698,170][1228,268]" drawing-order="0" hint="" />
+    <node>
+      <node index="0" text="搜索发现" resource-id="" class="android.widget.TextView" package="com.taobao.taobao" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[37,899][1225,1041]" drawing-order="0" hint="" />
+      <node>
+        <node index="0" text="" resource-id="" class="android.view.View" package="com.taobao.taobao" content-desc="卫生纸 近一个月曝光超10万" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[641,1253][1225,1446]" drawing-order="0" hint="">
+          <node index="0" text="" resource-id="" class="android.view.View" package="com.taobao.taobao" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[661,1274][816,1429]" drawing-order="0" hint="">
+            <node index="0" text="O1CN017dvDdU1bHZUaHPL26_!!6000000003440-2-yinhe.png_100x100xzq90.jpg_" resource-id="" class="android.widget.Image" package="com.taobao.taobao" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[661,1274][816,1429]" drawing-order="0" hint="" />
+          </node>
+          <node index="1" text="" resource-id="" class="android.view.View" package="com.taobao.taobao" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[833,1253][1225,1446]" drawing-order="0" hint="">
+            <node index="0" text="卫生纸" resource-id="" class="android.view.View" package="com.taobao.taobao" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[833,1280][1225,1358]" drawing-order="0" hint="" />
+            <node index="1" text="近一个月曝光超10万" resource-id="" class="android.widget.TextView" package="com.taobao.taobao" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[833,1365][1225,1419]" drawing-order="0" hint="" />
+          </node>
+        </node>
+      </node>
+    </node>
+  </node>
+</hierarchy>

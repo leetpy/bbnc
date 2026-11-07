@@ -1,0 +1,27 @@
+<?xml version='1.0' encoding='utf-8'?>
+<hierarchy>
+  <node package="com.eg.android.AlipayGphone" bounds="[0,0][1080,2400]">
+    <node>
+      <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.view.View" bounds="[0,264][1080,-5499]" clickable="false" enabled="true">
+        <node text="award" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.Image" bounds="[300,264][354,-5637]" clickable="false" enabled="true" />
+        <node text="浏览15s得1000肥料" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[375,264][780,-5649]" clickable="false" enabled="true" />
+      </node>
+      <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.view.View" bounds="[852,264][1071,-4284]" clickable="false" enabled="true">
+        <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.view.View" bounds="[843,264][1080,-4542]" clickable="false" enabled="true">
+          <node text="1000肥料" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[882,264][1038,-4596]" clickable="false" enabled="true" />
+          <node text="已发放" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[882,264][1038,-4560]" clickable="false" enabled="true" />
+        </node>
+        <node text="1000肥料" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[852,264][1071,-4425]" clickable="false" enabled="true" />
+        <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[852,264][1071,-4287]" clickable="false" enabled="true" />
+        <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.view.View" bounds="[858,264][1062,-4185]" clickable="false" enabled="true">
+          <node text="肥料" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[858,264][1062,-4233]" clickable="false" enabled="true" />
+          <node text="已发放" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[858,264][1062,-4200]" clickable="false" enabled="true" />
+        </node>
+      </node>
+    </node>
+    <node>
+      <node text="已发放" />
+      <node text="下单立得1000肥料" />
+    </node>
+  </node>
+</hierarchy>

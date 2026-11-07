@@ -1,0 +1,21 @@
+<?xml version='1.0' encoding='utf-8'?>
+<hierarchy>
+  <node package="com.eg.android.AlipayGphone" bounds="[0,0][1080,2400]">
+    <node index="0" text="做任务集肥料" resource-id="" class="android.view.View" package="com.eg.android.AlipayGphone" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[0,738][1080,867]" drawing-order="0" hint="">
+      <node index="0" text="" resource-id="" class="android.widget.TextView" package="com.eg.android.AlipayGphone" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[300,600][780,834]" drawing-order="0" hint="" />
+    </node>
+    <node index="1" text="关闭做任务集肥料弹窗" resource-id="" class="android.widget.Button" package="com.eg.android.AlipayGphone" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[897,717][984,807]" drawing-order="0" hint="" />
+    <node index="3" text="" resource-id="" class="android.view.View" package="com.eg.android.AlipayGphone" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[0,1128][1080,1302]" drawing-order="0" hint="">
+      <node index="0" text=" 逛好物最高得1500肥料当前进度0，总进度1 连续浏览可得多次肥料奖励" resource-id="" class="android.view.View" package="com.eg.android.AlipayGphone" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[66,1146][798,1284]" drawing-order="0" hint="" />
+      <node index="1" text="" resource-id="" class="android.view.View" package="com.eg.android.AlipayGphone" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[795,1176][1002,1251]" drawing-order="0" hint="">
+        <node index="0" text="去逛逛" resource-id="" class="android.widget.Button" package="com.eg.android.AlipayGphone" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[795,1176][1002,1251]" drawing-order="0" hint="" />
+      </node>
+    </node>
+    <node index="5" text="" resource-id="" class="android.view.View" package="com.eg.android.AlipayGphone" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[0,1500][1080,1677]" drawing-order="0" hint="">
+      <node index="0" text=" 逛好物立得1000肥料当前进度0，总进度1 浏览15s即可获得" resource-id="" class="android.view.View" package="com.eg.android.AlipayGphone" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[66,1521][798,1659]" drawing-order="0" hint="" />
+      <node index="1" text="" resource-id="" class="android.view.View" package="com.eg.android.AlipayGphone" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[795,1551][1002,1626]" drawing-order="0" hint="">
+        <node index="0" text="去完成" resource-id="" class="android.widget.Button" package="com.eg.android.AlipayGphone" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[795,1551][1002,1626]" drawing-order="0" hint="" />
+      </node>
+    </node>
+  </node>
+</hierarchy>

@@ -1,0 +1,8 @@
+<?xml version='1.0' encoding='utf-8'?>
+<hierarchy>
+  <node package="com.taobao.taobao" bounds="[0,0][1260,2800]">
+    <node text="芭芭农场-固搜-interact" content-desc="" package="com.taobao.taobao" resource-id="" class="android.webkit.WebView" bounds="[0,140][1265,2617]" clickable="false" enabled="true" />
+    <node text="搜索有福利" content-desc="" package="com.taobao.taobao" resource-id="" class="android.widget.TextView" bounds="[111,140][388,153]" clickable="false" enabled="true" />
+    <node text="任务完成" content-desc="" package="com.taobao.taobao" resource-id="" class="android.widget.TextView" bounds="[860,140][1039,130]" clickable="false" enabled="true" />
+  </node>
+</hierarchy>

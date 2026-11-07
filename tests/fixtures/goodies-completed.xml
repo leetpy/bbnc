@@ -1,0 +1,9 @@
+<?xml version='1.0' encoding='utf-8'?>
+<hierarchy>
+  <node package="com.eg.android.AlipayGphone" bounds="[0,0][1080,2400]">
+    <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.view.View" bounds="[0,0][1080,348]" clickable="false" enabled="true">
+      <node text="浏览得奖励" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[90,168][324,216]" clickable="false" enabled="true" />
+      <node text="今日任务已完成" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[612,198][897,240]" clickable="false" enabled="true" />
+    </node>
+  </node>
+</hierarchy>
