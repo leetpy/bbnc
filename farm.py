@@ -916,16 +916,7 @@ class Runner:
     def execute(self, page, only=None):
         """only 可限定一条任务身份，供当前页实机验证使用，不连带执行其他任务。"""
         if self.app == "alipay":
-            for key, handler in (("goodies", self.execute_goodies),
-                                 ("featured", self.execute_featured),
-                                 ("instant", self.execute_instant),
-                                 ("insurance", self.execute_insurance), ("saving", self.execute_saving)):
-                try:
-                    page = handler(page)
-                except TaskUnavailable as exc:
-                    page = exc.page
-                    self.event("跳过任务", task=ALIPAY_TASKS[key][0], reason=str(exc))
-            return page
+            return self.execute_alipay(page)
         attempted = set()
         rounds = 0
         # 后续任务可能在前一任务完成后才出现，不能用首屏进度固定循环预算。
@@ -1011,6 +1002,53 @@ class Runner:
                       "reward_messages": reward}
             self.results.append(result)
             self.event("任务完成", **result)
+
+    def execute_alipay(self, page):
+        """按当前列表调度，先做可点击任务；每次滚动和任务返回后重新匹配。"""
+        handlers = {"goodies": self.execute_goodies, "featured": self.execute_featured,
+                    "instant": self.execute_instant, "insurance": self.execute_insurance,
+                    "saving": self.execute_saving}
+        attempted = set()
+        scan_steps = 0
+        while True:
+            if not page.task_list:
+                raise RuntimeError("调度时已离开支付宝任务列表，停止操作")
+            candidates = [r for r in page.task_rows()
+                          if r["key"] in handlers and r["key"] not in attempted
+                          and r["button"] is not None
+                          and r["button"].get("enabled") != "false"
+                          and r["button"].get("text") in ("去完成", "去逛逛", "继续逛", "领取")
+                          and (r["current"] < r["total"]
+                               or r["button"].get("text") == "领取")]
+            if not candidates:
+                self.event("扫描结束", reason="当前列表没有尚未执行的支持任务")
+                return page
+            row = next((r for r in candidates if page.task_tappable(r["title"])
+                        and page.task_tappable(r["button"])), None)
+            if row is not None:
+                attempted.add(row["key"])
+                scan_steps = 0
+                self.event("匹配当前列表任务", task=row["name"])
+                try:
+                    page = handlers[row["key"]](page)
+                except TaskUnavailable as exc:
+                    page = exc.page
+                    self.event("跳过任务", task=row["name"], reason=str(exc))
+                continue
+            # 只有屏外还有支持任务才滚动，不为每一种处理器分别来回寻找。
+            if scan_steps >= 14:
+                self.event("扫描结束", reason="滚动后仍无可点击的支持任务")
+                return page
+            down = scan_steps >= 7
+            if isinstance(self.adb, ADB) and not self.adb.use_live_ui:
+                self.adb.use_live_ui = True
+                observed = self.adb.page()
+                if not observed.in_app:
+                    raise RuntimeError("滚动前已离开目标应用，停止扫描")
+            self.event("滚动扫描任务", direction="down" if down else "up")
+            self.adb.swipe(page, down=down, task_list=True)
+            scan_steps += 1
+            page = self.wait_page(lambda p: p.task_list, "滚动后的任务列表", timeout=20)
 
     def browse_instant(self, page, amount):
         """只滑动推进单次浏览，零秒和浮标消失均不作为发放成功的依据。"""

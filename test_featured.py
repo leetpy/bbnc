@@ -109,5 +109,5 @@ class FeaturedTests(unittest.TestCase):
             runner.execute_insurance = Mock(return_value=page)
             runner.execute_saving = Mock(return_value=page)
             runner.execute(page)
-            runner.execute_instant.assert_called_once_with(page)
+            runner.execute_instant.assert_not_called()
 

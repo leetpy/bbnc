@@ -153,8 +153,8 @@ class InstantTests(unittest.TestCase):
             runner.execute_insurance = Mock(return_value=page)
             runner.execute_saving = Mock(return_value=page)
             runner.execute(page)
-            runner.execute_insurance.assert_called_once_with(page)
-            runner.execute_saving.assert_called_once_with(page)
+            runner.execute_insurance.assert_not_called()
+            runner.execute_saving.assert_not_called()
 
 
 if __name__ == "__main__":

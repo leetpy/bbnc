@@ -179,8 +179,54 @@ class FarmTests(unittest.TestCase):
             runner.execute_insurance = Mock(side_effect=TaskUnavailable("任务不可定位", page))
             runner.execute_saving = Mock(return_value=page)
             self.assertIs(runner.execute(page), page)
-            runner.execute_saving.assert_called_once_with(page)
+            runner.execute_saving.assert_not_called()
             self.assertEqual(runner.results, [])
+
+    def test_alipay_matches_visible_tasks_again_after_each_handler(self):
+        # 屏外的好物任务不能抢在可点击的车险前面；返回后重新读取列表。
+        def row(key):
+            button = ET.Element("node", text="去完成", enabled="true")
+            return {"key": key, "name": key, "current": 0, "total": 1,
+                    "title": ET.Element("node"), "button": button}
+
+        hidden, visible, next_row = row("goodies"), row("insurance"), row("saving")
+        before, after = Mock(), Mock()
+        before.task_rows.return_value = [hidden, visible]
+        before.task_tappable.side_effect = lambda n: n is not hidden["title"]
+        after.task_rows.return_value = [next_row]
+        after.task_tappable.return_value = True
+        with tempfile.TemporaryDirectory() as directory:
+            runner = Runner(Mock(), Path(directory), 10, app="alipay")
+            runner.execute_goodies = Mock()
+            runner.execute_insurance = Mock(side_effect=TaskUnavailable("入口失效", after))
+            runner.execute_saving = Mock(return_value=after)
+            self.assertIs(runner.execute(before), after)
+            runner.execute_goodies.assert_not_called()
+            runner.execute_insurance.assert_called_once_with(before)
+            runner.execute_saving.assert_called_once_with(after)
+            runner.adb.swipe.assert_not_called()
+
+    def test_alipay_rechecks_all_tasks_after_one_scroll(self):
+        # 一次滚动后出现另一种支持任务，应直接做它，而非继续寻找原任务。
+        hidden, visible = Mock(), Mock()
+        hidden.get.side_effect = lambda key: {"text": "去完成", "enabled": "true"}.get(key)
+        visible.get.side_effect = hidden.get.side_effect
+        before, after = Mock(), Mock()
+        before.task_rows.return_value = [{"key": "goodies", "name": "好物",
+            "current": 0, "total": 1, "title": hidden, "button": hidden}]
+        before.task_tappable.return_value = False
+        after.task_rows.return_value = [{"key": "insurance", "name": "车险",
+            "current": 0, "total": 1, "title": visible, "button": visible}]
+        after.task_tappable.return_value = True
+        with tempfile.TemporaryDirectory() as directory:
+            runner = Runner(Mock(), Path(directory), 10, app="alipay")
+            runner.wait_page = Mock(return_value=after)
+            runner.execute_goodies = Mock()
+            runner.execute_insurance = Mock(return_value=after)
+            self.assertIs(runner.execute(before), after)
+            runner.adb.swipe.assert_called_once_with(before, down=False, task_list=True)
+            runner.execute_goodies.assert_not_called()
+            runner.execute_insurance.assert_called_once_with(after)
 
     def test_actual_browse_failure_is_not_mistaken_for_missing_task(self):
         with tempfile.TemporaryDirectory() as directory:
