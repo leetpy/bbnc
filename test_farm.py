@@ -19,6 +19,12 @@ def make_page(name="看严选推荐商品", current=3, total=6):
 
 
 class FarmTests(unittest.TestCase):
+    def setUp(self):
+        # 这些用例只验证任务处理流程；完整逐屏扫描由独立调度回归覆盖。
+        scan = patch.object(Runner, "scan_task_page", return_value=None)
+        self.scan_page = scan.start()
+        self.addCleanup(scan.stop)
+
     def test_real_single_round_tasks_have_distinct_reward_identity(self):
         # 实机同时出现两条单次任务；改名和滚动后仍必须匹配各自奖励。
         page = Page((Path(__file__).parent / "tests/fixtures/taobao-single-round-tasks.xml").read_text())
@@ -221,6 +227,13 @@ class FarmTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             runner = Runner(Mock(), Path(directory), 10, app="alipay")
             runner.wait_page = Mock(return_value=after)
+            # 此用例保留一次真实滚动，后续扫描由独立回归验证。
+            def scroll_once(page, scan):
+                if page is after:
+                    return None
+                runner.adb.swipe(page, down=False, task_list=True)
+                return runner.wait_page(lambda p: p.task_list, "滚动后的任务列表")
+            self.scan_page.side_effect = scroll_once
             runner.execute_goodies = Mock()
             runner.execute_insurance = Mock(return_value=after)
             self.assertIs(runner.execute(before), after)
@@ -265,7 +278,8 @@ class FarmTests(unittest.TestCase):
     def test_insurance_task_must_disappear_consecutively(self):
         with tempfile.TemporaryDirectory() as directory, patch("farm.time.sleep"):
             adb = Mock()
-            adb.page.side_effect = [self.insurance_page(s) for s in ("claimed", "ready", "confirm")]
+            # 三次领奖核验后，恢复检查读到搜索页，必须停止而不能继续操作旧列表。
+            adb.page.side_effect = [self.insurance_page(s) for s in ("claimed", "ready", "confirm", "entry")]
             runner = Runner(adb, Path(directory), 10, app="alipay")
             with self.assertRaisesRegex(RuntimeError, "领取状态未确认"):
                 runner.execute(self.insurance_page("ready"))
@@ -342,10 +356,12 @@ class FarmTests(unittest.TestCase):
             adb = Mock()
             adb.page.return_value = self.saving_page("ready")
             runner = Runner(adb, Path(directory), 10, app="alipay")
-            with self.assertRaisesRegex(RuntimeError, "领取状态未确认"):
-                runner.execute(self.saving_page("ready"))
+            runner.execute(self.saving_page("ready"))
             adb.tap.assert_called_once()
             self.assertEqual(runner.results, [])
+            self.assertIn("领取状态未确认", runner.failed_tasks[0]["reason"])
+            self.assertTrue(runner.failed_tasks[0]["can_continue"])
+            self.assertEqual(runner.summary()["status"], "partial")
 
     def test_saving_cancels_only_known_cross_app_prompt(self):
         prompt = self.saving_page("open-taobao")
@@ -711,7 +727,8 @@ class FarmTests(unittest.TestCase):
             completed = make_page("逛精选好物", current=1, total=1)
             def claim_first(page, row):
                 # 首屏只有礼包，完成后才出现浏览任务；不操作任何真实设备。
-                runner.results.append({"key": "gift"})
+                runner.results.append({"key": "gift", "task": row["name"], "before": 0,
+                                       "after": 1, "total": row["total"], "reward": row.get("reward")})
                 return later
             runner.claim_gift = Mock(side_effect=claim_first)
             runner.browse = Mock()
@@ -719,7 +736,8 @@ class FarmTests(unittest.TestCase):
             runner.return_list = Mock(return_value=completed)
             runner.execute(self.gift_page("before"))
             self.assertEqual(len(runner.results), 2)
-            self.assertEqual(runner.summary()["status"], "ok")
+            # 此用例将扫描替换为Mock，不能据此宣称整轮覆盖已确认。
+            self.assertFalse(runner.summary()["all_supported_tasks_complete"])
             runner.claim_gift.assert_called_once()
             adb.tap.assert_called_once()
 
@@ -847,6 +865,71 @@ class FarmTests(unittest.TestCase):
             runner.execute(make_page(current=5))
             self.assertEqual(runner.results[0]["after"], 6)
             self.assertEqual(runner.results[0]["reward_messages"], ["400肥料到账啦!"])
+
+
+
+
+class TaskScanningTests(unittest.TestCase):
+    """使用真实页面和扫描逻辑，覆盖懒加载任务与列表边界。"""
+
+    def test_both_apps_discover_task_missing_from_initial_xml(self):
+        for app in ("taobao", "alipay"):
+            with self.subTest(app=app), tempfile.TemporaryDirectory() as directory:
+                if app == "taobao":
+                    empty = make_page(current=6)
+                    target = make_page("领肥料礼包", 0, 1)
+                    target = Page(ET.tostring(target.root, encoding="unicode")
+                                  .replace('text="去完成"', 'text="去领取"')
+                                  .replace('clickable="true"', 'clickable="true" enabled="true"'))
+                    handler_name = "claim_gift"
+                else:
+                    empty = FarmTests().insurance_page("claimed")
+                    target = FarmTests().insurance_page("before")
+                    handler_name = "execute_insurance"
+                runner = Runner(Mock(), Path(directory), 10, app=app)
+                # 首次滚动才加载支持任务；后续页面固定，模拟已经到达边界。
+                runner.wait_page = Mock(side_effect=[target] + [empty] * 20)
+                handler = Mock(return_value=empty)
+                setattr(runner, handler_name, handler)
+                runner.execute(empty)
+                handler.assert_called_once()
+                self.assertIs(handler.call_args.args[0], target)
+                self.assertLessEqual(runner.adb.swipe.call_count, 15)
+                self.assertTrue(any(c.kwargs["down"] for c in runner.adb.swipe.call_args_list))
+
+    def test_scanning_uses_screen_changes_when_xml_is_stale(self):
+        # WebView XML 完全不变时，截图内容仍在移动，不能误判已经到边界。
+        pages = [make_page(current=6) for _ in range(4)]
+        for index, page in enumerate(pages):
+            page.screen_signature = (("当前可见任务", index * 100),)
+        with tempfile.TemporaryDirectory() as directory:
+            runner = Runner(Mock(), Path(directory), 10)
+            runner.wait_page = Mock(side_effect=pages[1:] + [pages[-1]] * 20)
+            runner.execute(pages[0])
+            forward = [c for c in runner.adb.swipe.call_args_list if not c.kwargs["down"]]
+            self.assertEqual(len(forward), 5)
+            self.assertEqual(runner.adb.swipe.call_count, 7)
+
+    def test_small_ocr_box_jitter_does_not_prevent_boundary_detection(self):
+        # 静止截图的 OCR 框会抖动几个像素，仍应在两个方向各两次后停下。
+        pages = [make_page(current=6) for _ in range(6)]
+        for index, page in enumerate(pages):
+            page.screen_signature = (("买限时折扣好物得奖励(0/1)", 1000 + index % 3),)
+        with tempfile.TemporaryDirectory() as directory:
+            runner = Runner(Mock(), Path(directory), 10)
+            runner.wait_page = Mock(side_effect=pages[1:])
+            runner.execute(pages[0])
+            self.assertEqual(runner.adb.swipe.call_count, 4)
+
+    def test_unchanged_page_stops_in_both_directions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            page = make_page(current=6)
+            runner = Runner(Mock(), Path(directory), 10)
+            runner.wait_page = Mock(return_value=page)
+            runner.execute(page)
+            self.assertEqual(runner.adb.swipe.call_count, 4)
+            self.assertEqual([c.kwargs["down"] for c in runner.adb.swipe.call_args_list],
+                             [False, False, True, True])
 
 
 if __name__ == "__main__":

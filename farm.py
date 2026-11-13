@@ -14,7 +14,9 @@ import shutil
 import subprocess
 import sys
 import time
+import tempfile
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 
 PACKAGE = "com.taobao.taobao"
@@ -35,9 +37,17 @@ TASKS = {
     "takeaway": ("领百亿外卖红包",),  # 实测为5秒浏览任务，复用浏览及返回核验流程。
 }
 COINS_TASK = re.compile(r"^双11来淘金币狂享\d+(?:\.\d+)?[亿万]$")
+# 推荐浏览会改为具体商品词；仍须在解析任务行时核验浏览说明、奖励与操作按钮。
+DYNAMIC_SELECTED_TASK = re.compile(r"^看看#[^#()（）\r\n]+$")
 PROGRESS = re.compile(r"^(.+?)[(（](\d+)/(\d+)[)）]$")
 SAVING_TASK = re.compile(r"^\s*逛一逛省钱会场当前进度(\d+)，总进度(\d+)")
 ALIPAY_TASKS = {
+    "home_farm": ("从支付宝首页访问农场", re.compile(
+        r"^\s*从支付宝首页访问农场当前进度(\d+)，总进度(\d+)")),
+    "gold_visit": ("逛支付宝金豆夺宝", re.compile(
+        r"^\s*逛支付宝金豆夺宝当前进度(\d+)，总进度(\d+)")),
+    "home_gold": ("从支付宝首页访问金豆", re.compile(
+        r"^\s*从支付宝首页访问金豆当前进度(\d+)，总进度(\d+)")),
     "instant": ("逛好物立得肥料", re.compile(
         r"^\s*(?:逛好物|浏览好物)立得\d+肥料当前进度(\d+)，总进度(\d+)")),
     "goodies": ("逛好物最高得肥料", re.compile(
@@ -53,6 +63,8 @@ MAX_TASK_ROUNDS = 100  # 只限制任务尝试次数，不限制完成后的最�
 MAX_GOODIES_CARDS = 10  # 奖励现身卡片每张100，最多核验10张，不按点击动作推算到账。
 MAX_CARD_SCAN_SWIPES = 30
 MAX_CARD_IDLE_SWIPES = 6
+BROWSE_READ_INTERVAL = 1.0  # 采集尚未结束时至多静候1秒，再推进已验证页面的浏览。
+MAX_ACTIVE_READ_SECONDS = 20  # 页面长时间无法核验时停止操作，不无限维持旧状态。
 
 
 class TaskUnavailable(RuntimeError):
@@ -60,6 +72,10 @@ class TaskUnavailable(RuntimeError):
     def __init__(self, message, page):
         super().__init__(message)
         self.page = page
+
+
+class TaskVerificationFailed(RuntimeError):
+    """返回后的进度或领奖核验失败；只有再次感知确认任务列表后才允许继续其他任务。"""
 
 
 def bounds(node):
@@ -132,6 +148,11 @@ class Page:
         self.nodes = list(self.root.iter("node"))
         self.parents = {child: parent for parent in self.root.iter() for child in parent}
         self.texts = [n.get("text", "") for n in self.nodes]
+        self.screen_rows = None
+        self.screen_signature = None
+        self.screen_nodes = set()
+        self.screen_issues = []  # 记录截图中无法唯一绑定的入口，供扫描汇总解释漏跑原因。
+        self.browse_motion_since_capture = False  # 采集期间滚动过的卡片坐标不得直接点击。
         # 顶层窗口才代表屏幕：横向轮播的屏外子节点实测可延伸到 x=41640。
         # 用所有节点的最大边界会把点击压缩到屏幕左侧，并误判屏外按钮可见。
         windows = [n for n in self.root.findall("node")
@@ -156,6 +177,9 @@ class Page:
         if self.reward_popup:
             return False
         if self.package == APPS["alipay"]["package"]:
+            # 首页访问引导覆盖列表时，背景节点仍存在，不能按背景任务坐标操作。
+            if any(self.entry(label) is not None for label in ("从常用访问金豆", "从常用访问农场")):
+                return False
             return self.in_app and self.has("做任务集肥料") and self.has("关闭做任务集肥料弹窗")
         return self.has("肥料明细") and any(
             n.get("text") in ("去完成", "去逛逛", "去领取", "去开启", "已领取", "已完成")
@@ -196,6 +220,8 @@ class Page:
 
     def task_tappable(self, node):
         """任务入口须在父容器裁剪区域内，且点击中心不被推广横幅覆盖。"""
+        if self.screen_rows is not None and node not in self.screen_nodes:
+            return False
         if node is None or not self.visible(node) or node.get("enabled") == "false":
             return False
         x1, y1, x2, y2 = bounds(node)
@@ -237,7 +263,106 @@ class Page:
                      and (n.get("text") == label or n.get("content-desc") == label)
                      and n.get("enabled") != "false" and self.visible(n)), None)
 
+    @property
+    def alipay_home(self):
+        """用原生首页标签及常用应用区域确认首页，不把小程序中的引导图当入口。"""
+        return (self.package == APPS["alipay"]["package"] and self.in_app
+                and any(n.get("resource-id") == "com.alipay.android.tablauncher:id/selected_fl"
+                        and n.get("content-desc") == "首页" for n in self.nodes)
+                and self.entry("扫一扫") is not None)
+
+    def common_app(self, label):
+        """首页仅使用常用应用区域的真实入口，兼容常用列表中的文字和图标副本。"""
+        if not (self.alipay_home or self.has("最近常用应用")):
+            return None
+        return next((n for n in self.nodes if n.get("text") == label and self.visible(n)
+                     and n.get("enabled") != "false"
+                     and (self.has("最近常用应用") or n.get("resource-id", "").endswith(":id/tv_usual_name"))), None)
+
+    @property
+    def gold_venue(self):
+        """金豆会场顶部为画布；用实机兑换区和支金豆浮条共同确认，只观察不兑换。"""
+        return (self.package == APPS["alipay"]["package"] and self.in_app
+                and not self.task_list and self.has("兑换明细")
+                and "支金豆" in self.texts and "立即兑" in self.texts)
+
+    @property
+    def farm_home_service(self):
+        """首页访问农场实测先进入服务引导，只有明确指向农场的入口才可点击。"""
+        return (self.in_app and self.has("请访问首页服务")
+                and "点击这里，访问「芭芭农场」" in self.texts
+                and self.entry("芭芭农场") is not None)
+
+    def apply_task_screen(self, screen):
+        """用同一张截图的完整任务标题和右侧按钮替代列表的失真坐标。"""
+        original = self.task_rows()
+        width, height = screen["width"], screen["height"]
+        def normalized(text):
+            # OCR 常在中文之间插入空格，括号也可能识别为中文全角。
+            return re.sub(r"\s+", "", text).translate(str.maketrans("（）", "()"))
+        texts = [(normalized(r["text"]), r["bounds"]) for r in screen["rows"]
+                 if r.get("confidence", 0) >= 0.5]
+        # 截图必须仍是任务面板；否则不能拿刚才的 XML 去点已经切换的页面。
+        markers = (("做任务集肥料",) if self.package == APPS["alipay"]["package"]
+                   else ("肥料明细", "做任务赚肥料"))
+        if not any(any(marker in t for marker in markers) for t, _ in texts):
+            raise RuntimeError("截图未核验到任务面板，停止点击")
+        # 保留未在截图中确认的 XML 任务供完成核验，但禁止按其旧坐标调度。
+        self.screen_rows = list(original)
+        self.screen_nodes.clear()
+        panel_top = max(box[3] for text, box in texts
+                        if any(marker in text for marker in markers))
+        # OCR 边框会有几个像素抖动；只比较列表任务标题，排除背景轮播和时钟。
+        self.screen_signature = tuple(sorted(((text, (box[1] + box[3]) // 2) for text, box in texts
+                                              if box[1] >= panel_top and PROGRESS.fullmatch(text)),
+                                             key=lambda item: (item[1], item[0])))
+        for text, title_box in texts:
+            match = PROGRESS.fullmatch(text)
+            if match is None or title_box[1] < panel_top:
+                continue
+            name, current, total = match.groups()
+            matches = [r for r in original if normalized(r["name"]) == name and r["total"] == int(total)]
+            if not matches:
+                continue
+            # 奖励位于标题下方、下一个任务标题上方；不能拿相邻行金额解除身份歧义。
+            next_top = min((box[1] for title, box in texts if PROGRESS.fullmatch(title)
+                            and box[1] > title_box[3]), default=height)
+            row_bottom = min(next_top, title_box[3] + height * 0.065)
+            rewards = {t for t, box in texts if re.fullmatch(r"\+\d+", t)
+                       and title_box[0] <= box[0] < width * 0.7
+                       and title_box[1] <= (box[1] + box[3]) / 2 < row_bottom}
+            if rewards:
+                matches = [r for r in matches if len(rewards) == 1 and r.get("reward") in rewards]
+            if len(matches) != 1:
+                self.screen_issues.append({"task": name, "reason": "同行奖励冲突或任务身份不唯一"})
+                continue
+            # 只配对同一行右侧的操作文字；相邻行按钮和底部推广入口不能代替。
+            buttons = [(t, box) for t, box in texts
+                       if t in ("去完成", "去逛逛", "去领取", "已完成", "已领取", "继续逛", "领取")
+                       or re.fullmatch(r"\d+点可领", t)]
+            buttons = [(t, box) for t, box in buttons
+                       if box[0] > width * 0.7 and box[0] > title_box[2]
+                       and abs((box[1] + box[3] - title_box[1] - title_box[3]) / 2)
+                       < height * 0.04]
+            if len(buttons) != 1:
+                self.screen_issues.append({"task": name, "reason": "同行任务按钮未能唯一识别"})
+                continue
+            row = dict(matches[0])
+            row["current"] = int(current)
+            for key, label, box in (("title", text, title_box),
+                                    ("button", buttons[0][0], buttons[0][1])):
+                # OCR 为截图像素，换算回当前 UI 尺寸后仍走统一触控比例换算。
+                left, top, right, bottom = [int(v * scale) for v, scale in zip(
+                    box, (self.width / width, self.height / height) * 2)]
+                node = ET.Element("node", text=label, enabled="true", clickable="true",
+                                  bounds=f"[{left},{top}][{right},{bottom}]")
+                row[key] = node
+                self.screen_nodes.add(node)
+            self.screen_rows[original.index(matches[0])] = row
+
     def task_rows(self):
+        if self.screen_rows is not None:
+            return self.screen_rows
         if self.package != PACKAGE:
             rows = []
             for node in self.nodes:
@@ -263,6 +388,9 @@ class Page:
                 continue
             name, current, total = match.groups()
             key = next((key for key, aliases in TASKS.items() if name in aliases), None)
+            dynamic_selected = DYNAMIC_SELECTED_TASK.fullmatch(name) is not None
+            if key is None and dynamic_selected:
+                key = "selected"
             if key is None and COINS_TASK.fullmatch(name):
                 key = "coins"
             if key is None:
@@ -288,6 +416,13 @@ class Page:
             # 奖励必须来自标题与按钮的最小共同容器，不能取相邻任务的金额。
             rewards = [n.get("text") for n in parent.iter("node")
                        if re.fullmatch(r"\+\d+", n.get("text", ""))] if button is not None else []
+            if dynamic_selected:
+                # 不把商品广告或下单任务按“看看#”前缀放行；证据必须来自同一任务容器。
+                texts = [n.get("text", "") for n in parent.iter("node")] if parent is not None else []
+                if (button is None or button.get("text") not in ("去完成", "已完成", "已领取")
+                        or len(rewards) != 1 or not 0 <= int(current) <= int(total) or int(total) < 1
+                        or not any(re.fullmatch(r"浏览\d+秒得(?:奖励)?", text) for text in texts)):
+                    continue
             rows.append({"key": key, "name": name, "current": int(current),
                          "reward": rewards[0] if len(rewards) == 1 else None,
                          "total": int(total), "title": node, "button": button})
@@ -410,6 +545,19 @@ class Page:
                       or n.get("text") == "已领取全部奖励"), None)
         panel = self.parents.get(label) if label is not None else None
         if panel is None:
+            # 新版提示改为“当前浏览30秒可得750”；限定在导航标题旁的奖励栏，
+            # 不从商品区或重复的简版顶栏收集金额和领取状态。
+            for hint in self.nodes:
+                if not re.fullmatch(r"当前浏览\d+秒可得\d+", hint.get("text", "")):
+                    continue
+                candidate = self.parents.get(hint)
+                body = self.parents.get(candidate)
+                if (candidate is not None and body is not None
+                        and any(n.get("text") == "滑动浏览或查看商品得肥料" for n in candidate)
+                        and any(n.get("text") == "浏览得奖励" for n in body)):
+                    panel = candidate
+                    break
+        if panel is None:
             return None
         stages = []
         for child in panel:
@@ -526,6 +674,7 @@ class ADB:
         self.ui_buffer = b""
         self.ui_ready = False
         self.use_live_ui = False
+        self.ocr_directory = None
 
     def run(self, *args, timeout=25):
         # 延迟解析，首次设备操作前确定路径；后续命令及持续采集器共用该路径。
@@ -572,10 +721,39 @@ class ADB:
                     self.live_dump(remote)
             xml = self.run("shell", "cat", remote)
             page = Page(xml, self.package)
+            if page.task_list and sys.platform == "darwin":
+                page.apply_task_screen(self.task_screen())
+                logging.info("截图校验%s任务：%s", self.name,
+                             [r["name"] for r in page.task_rows() if r["title"] in page.screen_nodes])
             self.viewport = (page.width, page.height)
             return page
         finally:
             self.run("shell", "rm", "-f", remote)
+
+    def task_screen(self):
+        """截图并调用本机 Vision；临时目录自动清理，识别失败不退回旧坐标点击。"""
+        source = Path(__file__).parent / "tools" / "task-screen-ocr.m"
+        if self.ocr_directory is None:
+            self.ocr_directory = tempfile.TemporaryDirectory(prefix="bbnc-task-screen-")
+            atexit.register(self.ocr_directory.cleanup)
+        directory = Path(self.ocr_directory.name)
+        image_path = directory / "screen.png"
+        binary = directory / "ocr"
+        if not binary.exists():
+            # 同一 ADB 会话仅编译一次；临时程序不进入仓库或用户系统目录。
+            subprocess.run(["clang", "-fobjc-arc", "-framework", "Foundation",
+                            "-framework", "Vision", "-framework", "ImageIO",
+                            "-framework", "CoreGraphics", str(source), "-o", str(binary)],
+                           capture_output=True, check=True, timeout=30)
+        try:
+            shot = subprocess.run(self.prefix + ["exec-out", "screencap", "-p"],
+                                  capture_output=True, check=True, timeout=15)
+            image_path.write_bytes(shot.stdout)
+            result = subprocess.run([str(binary), str(image_path)], capture_output=True,
+                                    check=True, timeout=20)
+            return json.loads(result.stdout)
+        finally:
+            image_path.unlink(missing_ok=True)
 
     def reader_wait(self, expected, timeout=35):
         """读取有超时的逐行协议；不对管道直接 readline，防止半行输出阻塞。"""
@@ -642,6 +820,9 @@ class ADB:
                 logging.warning("清理 UI 采集器临时文件失败：%s", remote)
         self.ui_buffer = b""
         self.ui_ready = False
+        if self.ocr_directory is not None:
+            self.ocr_directory.cleanup()
+            self.ocr_directory = None
 
     def tap(self, node):
         x1, y1, x2, y2 = bounds(node)
@@ -686,8 +867,53 @@ class Runner:
         self.timeout = task_timeout
         self.results = []
         self.events = directory / "events.jsonl"
+        self.scan_reports = []
+        self.task_observations = {}
+        self.unsupported_observations = {}
+        self.skipped_tasks = []
+        self.failed_tasks = []
+        self.run_scope = {"mode": "unspecified", "task_keys": []}
+        self._scan_handoff = None  # 仅在任务移除核验与紧接的调度之间传递覆盖证据。
+
+    def set_run_scope(self, mode, task_keys=None):
+        """声明整轮、单项、验证或只读范围；task_keys仅列本次明确选择的任务族。"""
+        if mode not in ("full", "single_task", "verification", "inspect", "navigate", "scan_only"):
+            raise ValueError(f"未知运行范围：{mode}")
+        self.run_scope = {"mode": mode, "task_keys": list(task_keys or [])}
+
+    def begin_task_scope(self, key, page):
+        """直接调用单项处理器时自动标记范围，并保存已观察到的其他待办。"""
+        if self.run_scope["mode"] == "unspecified":
+            self.set_run_scope("single_task", [key])
+        elif (self.run_scope["mode"] in ("single_task", "verification")
+              and self.run_scope["task_keys"] and key not in self.run_scope["task_keys"]):
+            raise RuntimeError(f"任务{key}不在声明的运行范围内，拒绝执行")
+        self.observe_tasks(page)
+
+    def recover_verification_failure(self, row, error):
+        """隔离单项核验失败；必须重新读取并确认真实列表，不能使用处理器的旧页面继续。"""
+        failure = {"task": row["name"], "key": row["key"], "before": row["current"],
+                   "total": row["total"], "reason": str(error), "can_continue": False}
+        self.failed_tasks.append(failure)
+        try:
+            page = self.perceive(retries=1)
+            if not isinstance(page, Page) or not page.in_app or not page.task_list:
+                raise RuntimeError("当前页面不是目标应用任务列表")
+        except (RuntimeError, subprocess.TimeoutExpired, ET.ParseError) as exc:
+            self.event("任务核验失败", **failure)
+            raise RuntimeError(f"{error}；无法重新确认支付宝任务列表，停止后续操作：{exc}") from error
+        snapshot = self.directory / f"task-verification-failed-{time.time_ns()}.xml"
+        snapshot.write_bytes(ET.tostring(page.root, encoding="utf-8"))
+        failure.update(can_continue=True, xml=str(snapshot))
+        self.observe_tasks(page)
+        self.event("任务核验失败", **failure)
+        return page
 
     def event(self, event, **data):
+        if event == "跳过任务":
+            item = {k: data[k] for k in ("task", "reason", "current", "total") if k in data}
+            if item not in self.skipped_tasks:
+                self.skipped_tasks.append(item)
         data.setdefault("app", self.app)
         record = {"time": dt.datetime.now().astimezone().isoformat(),
                   "event": event, **data}
@@ -707,6 +933,49 @@ class Runner:
                 if attempt + 1 == retries:
                     raise
                 time.sleep(1)
+
+    def perceive_active_browse(self, page):
+        """慢采集期间维持支付宝计时浏览；采集线程退出后才允许点击、返回或结束。"""
+        if not isinstance(self.adb, ADB) or self.app != "alipay":
+            return self.perceive()
+        if not page.in_app or (page.goodies_state() is None and page.instant_state() is None):
+            raise RuntimeError("未确认支付宝浏览奖励页面，拒绝维持滑动")
+        # 动画浏览页不能先等标准dump的idle超时，否则一次后端切换就可能耗尽采集保护时间。
+        self.adb.use_live_ui = True
+        started = time.monotonic()
+        swipes = 0
+        def finish_capture(observed):
+            """给本次采集结果标注坐标新鲜性，并记录实际采集耗时与补充滑动次数。"""
+            observed.browse_motion_since_capture = swipes > 0
+            self.event("浏览UI采集完成", capture_seconds=round(time.monotonic() - started, 2),
+                       extra_swipes=swipes)
+            return observed
+
+        # 只有采集线程使用持续UI协议；主线程仅执行前台检查与滑动，不并发读写采集管道。
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="farm-browse-read") as pool:
+            future = pool.submit(self.perceive)
+            while True:
+                try:
+                    observed = future.result(timeout=BROWSE_READ_INTERVAL)
+                    return finish_capture(observed)
+                except FutureTimeoutError:
+                    if future.done():
+                        # 采集自身抛出的TimeoutError必须传播，不能误当成仍在等待。
+                        return finish_capture(future.result())
+                elapsed = time.monotonic() - started
+                if elapsed >= min(self.timeout, MAX_ACTIVE_READ_SECONDS):
+                    raise RuntimeError("浏览UI采集过慢，停止滑动并等待采集退出，保留页面")
+                activity = self.adb.run("shell", "dumpsys", "activity", "activities", timeout=5)
+                resumed = ([line for line in activity.splitlines() if "topResumedActivity" in line]
+                           or [line for line in activity.splitlines() if "mResumedActivity" in line])
+                if not resumed or not all(re.search(r"\b" + re.escape(self.config["package"]) + r"/", line)
+                                           for line in resumed):
+                    raise RuntimeError("支付宝已不在前台，停止浏览滑动")
+                if future.done():
+                    continue
+                self.adb.swipe(page)
+                swipes += 1
+                self.event("浏览采集中继续滑动", swipes=swipes, capture_seconds=round(elapsed, 2))
 
     def enter_list(self):
         page = self.perceive()
@@ -875,7 +1144,9 @@ class Runner:
     def task_row(page, row):
         # 总次数相同的真实任务也可能并存；奖励缺失时仍严格拒绝歧义。
         matches = [r for r in page.task_rows()
-                   if Runner.task_identity(r) == Runner.task_identity(row)]
+                   if Runner.task_identity(r) == Runner.task_identity(row)
+                   and (page.screen_rows is None or page.package != PACKAGE
+                        or r["title"] in page.screen_nodes)]
         if len(matches) > 1:
             raise RuntimeError("任务身份不唯一，停止匹配以免串任务")
         return matches[0] if matches else None
@@ -913,19 +1184,201 @@ class Runner:
             time.sleep(1)
         raise RuntimeError(f"礼包领取未核验成功：按钮 {before_button} → {after_button}")
 
+    def observe_tasks(self, page):
+        """累积本轮见过的任务；截图未确认的旧XML不能覆盖已核验的进度。"""
+        if not isinstance(page, Page) or not page.task_list or page.screen_signature == ():
+            return
+        rows = page.task_rows()
+        names = {re.sub(r"\s+", "", r["name"]) for r in rows}
+        for row in rows:
+            identity = self.task_identity(row)
+            confirmed = page.screen_rows is None or row["title"] in page.screen_nodes
+            if not confirmed and identity in self.task_observations:
+                continue
+            button = row["button"].get("text") if row["button"] is not None else None
+            issues = [issue["reason"] for issue in page.screen_issues
+                      if issue["task"] == row["name"]]
+            self.task_observations[identity] = {
+                "task": row["name"], "key": row["key"], "current": row["current"],
+                "total": row["total"], "reward": row.get("reward"), "button": button,
+                "screenshot_confirmed": confirmed,
+                "reason": issues[0] if issues else None}
+        for text in page.texts:
+            match = PROGRESS.fullmatch(text)
+            if match is None and self.app == "alipay":
+                match = re.match(r"^\s*(.+?)当前进度(\d+)，总进度(\d+)", text)
+            if match is None:
+                continue
+            name, current, total = match.groups()
+            name = name.strip()
+            if re.sub(r"\s+", "", name) not in names:
+                self.unsupported_observations[name, int(total)] = {
+                    "task": name, "current": int(current), "total": int(total),
+                    "reason": "当前执行器未支持或任务行证据不足"}
+
+    @staticmethod
+    def same_screen_signature(first, second):
+        """比较非空OCR任务指纹，容忍框抖动；空指纹不构成任何静止证据。"""
+        return bool(first) and bool(second) and len(first) == len(second) and all(
+            a[0] == b[0] and abs(a[1] - b[1]) <= 20 for a, b in zip(first, second))
+
+    @staticmethod
+    def coverage_inventory(page):
+        """仅用任务文字、进度、奖励和按钮检测列表变化，不缓存可点击坐标。"""
+        return (tuple(sorted(text for text in page.texts if PROGRESS.fullmatch(text)
+                             or "当前进度" in text)),
+                tuple(sorted((r["key"], r["name"], r["current"], r["total"],
+                              r.get("reward") or "", r["button"].get("text", "")
+                              if r["button"] is not None else "") for r in page.task_rows())))
+
+    def consume_scan_handoff(self, page):
+        """只复用紧接上次移除核验的空待办覆盖；页面或任务清单变化即作废。"""
+        handoff, self._scan_handoff = self._scan_handoff, None
+        if (handoff is not None and isinstance(page, Page) and page.task_list
+                and time.monotonic() - handoff["time"] <= 10
+                and self.same_screen_signature(handoff["signature"], page.screen_signature)
+                and handoff["inventory"] == self.coverage_inventory(page)):
+            self.event("复用扫描覆盖", reason="刚完成移除核验，任务清单及当前位置未变化")
+            return {"reuse_complete": True}
+        return {}
+
+    def finish_scan(self, page, scan, outcome, reason):
+        """区分到达边界、保护上限和识别失败，并保留不完整扫描的现场。"""
+        scan["outcome"] = outcome
+        report = {"purpose": scan.get("purpose", "schedule"), "outcome": outcome, "reason": reason}
+        if scan.get("unresolved"):
+            report["unresolved_tasks"] = list(scan["unresolved"].values())
+        if outcome != "complete":
+            snapshot = self.directory / f"scan-incomplete-{time.time_ns()}.xml"
+            snapshot.write_bytes(ET.tostring(page.root, encoding="utf-8"))
+            report["xml"] = str(snapshot)
+        self.scan_reports.append(report)
+        self.event("扫描结束", **report)
+        return None
+
+    def scan_task_page(self, page, scan):
+        """无可点击任务时滚动一屏；scan 保存方向、次数和重复页面，防止无限扫描。"""
+        self.observe_tasks(page)
+        if scan.pop("reuse_complete", False):
+            return self.finish_scan(page, scan, "complete", "复用刚完成的完整扫描覆盖")
+        if page.screen_signature is not None and not page.screen_signature:
+            # 漏读时先原地重新采集，不能滑动，也不能把空结果累计为列表边界。
+            scan["ocr_misses"] = scan.get("ocr_misses", 0) + 1
+            scan.pop("last", None)
+            scan["repeats"] = 0
+            if scan["ocr_misses"] >= 3:
+                return self.finish_scan(page, scan, "recognition_failed", "连续3次未识别到完整任务行")
+            self.event("扫描识别重试", attempt=scan["ocr_misses"], reason="OCR任务指纹为空，原地重采集")
+            time.sleep(0.5)
+            return self.perceive()
+        scan["ocr_misses"] = 0
+        discovered = scan.setdefault("discovered", set())
+        unresolved = scan.setdefault("unresolved", {})
+        for row in page.task_rows():
+            identity = self.task_identity(row)
+            if page.screen_rows is not None:
+                if row["title"] in page.screen_nodes:
+                    unresolved.pop(identity, None)
+                else:
+                    issues = [issue for issue in page.screen_issues if issue["task"] == row["name"]]
+                    if issues:
+                        unresolved[identity] = {"task": row["name"], "reason": issues[0]["reason"]}
+            if (row["current"] < row["total"] and row["button"] is not None
+                    and row["button"].get("text") in ("去完成", "去逛逛", "去领取", "继续逛", "领取")
+                    and page.task_tappable(row["title"]) and page.task_tappable(row["button"])):
+                discovered.add((*self.task_identity(row), row["current"]))
+        signature = tuple((n.get("text", ""), n.get("content-desc", ""), n.get("bounds", ""))
+                          for n in page.nodes if page.visible(n)
+                          and (n.get("text") or n.get("content-desc")))
+        if page.screen_signature is not None:
+            signature = page.screen_signature
+        same = signature == scan.get("last")
+        if page.screen_signature is not None and scan.get("last") is not None:
+            same = self.same_screen_signature(signature, scan["last"])
+        scan["repeats"] = scan.get("repeats", 0) + 1 if same else 0
+        scan["last"] = signature
+        # 先向列表下方扫描，再反向补扫，兼容从列表中间启动或任务返回后位置变化。
+        if scan.get("steps", 0) >= 7 or scan["repeats"] >= 2:
+            if scan["repeats"] < 2:
+                scan["limited"] = True
+            if scan.get("down", False):
+                outcome = ("limit" if scan.get("limited") else
+                           "recognition_failed" if unresolved else "complete")
+                reason = ("达到滚动保护上限，覆盖未确认" if scan.get("limited") else
+                          "存在未解决的截图任务身份或按钮歧义" if unresolved else
+                          "两个方向均确认列表不再移动")
+                return self.finish_scan(page, scan, outcome, reason)
+            scan.update(down=True, steps=0, repeats=0)
+            # 以当前页面为反向滚动的基线，静止次数重新计数。
+        if isinstance(self.adb, ADB) and not self.adb.use_live_ui:
+            self.adb.use_live_ui = True
+            if not self.adb.page().in_app:
+                raise RuntimeError("滚动前已离开目标应用，停止扫描")
+        down = scan.get("down", False)
+        self.event("滚动扫描任务", direction="down" if down else "up",
+                   tasks=[{"name": r["name"], "progress": r["current"],
+                           "title_tappable": page.task_tappable(r["title"]),
+                           "button_tappable": page.task_tappable(r["button"])}
+                          for r in page.task_rows()],
+                   screenshot_verified=page.screen_rows is not None)
+        self.adb.swipe(page, down=down, task_list=True)
+        scan["steps"] = scan.get("steps", 0) + 1
+        return self.wait_page(lambda p: p.task_list, "滚动后的任务列表", timeout=20)
+
+    def verify_task_return(self, page, row):
+        """截图模式下先找回屏外任务；双向到达边界后才允许确认任务已移除。"""
+        if page.screen_rows is None:
+            return page, self.task_row(page, row)
+        self._scan_handoff = None
+        scan = {"purpose": "verify"}
+        while True:
+            self.observe_tasks(page)
+            after = self.task_row(page, row)
+            if after is not None:
+                return page, after
+            next_page = self.scan_task_page(page, scan)
+            if next_page is None:
+                if scan.get("outcome") != "complete":
+                    raise RuntimeError("截图扫描覆盖未确认，不能确认任务已移除")
+                if not scan.get("discovered"):
+                    self._scan_handoff = {"signature": page.screen_signature,
+                                          "inventory": self.coverage_inventory(page),
+                                          "time": time.monotonic()}
+                self.event("截图核验任务移除", task=row["name"], evidence="双向扫描均到达列表边界")
+                return page, None
+            page = next_page
+
     def execute(self, page, only=None):
         """only 可限定一条任务身份，供当前页实机验证使用，不连带执行其他任务。"""
+        if self.run_scope["mode"] != "verification":
+            self.set_run_scope("single_task" if only is not None else "full",
+                               [only[0]] if only is not None else None)
         if self.app == "alipay":
-            return self.execute_alipay(page)
+            return self.execute_alipay(page, only=only)
         attempted = set()
         rounds = 0
+        scan = self.consume_scan_handoff(page)
         # 后续任务可能在前一任务完成后才出现，不能用首屏进度固定循环预算。
         while True:
+            if not page.task_list:
+                raise RuntimeError("调度时已离开淘宝任务列表，停止操作")
+            self.observe_tasks(page)
             candidates = [r for r in page.task_rows()
                           if r["current"] < r["total"]
                           and (only is None or (r["key"], r["total"]) == only)
                           and (*self.task_identity(r), r["current"]) not in attempted]
+            # 当前屏优先执行；屏外任务不再提前锁定，滚动后重新挑选。
+            candidates = [r for r in candidates if r["button"] is not None
+                          and r["button"].get("text") in ("去完成", "去逛逛", "去领取")
+                          and page.task_tappable(r["title"]) and page.task_tappable(r["button"])]
             if not candidates:
+                if only is not None and any((r["key"], r["total"]) == only
+                                            and r["after"] >= r["total"] for r in self.results):
+                    return
+                next_page = self.scan_task_page(page, scan)
+                if next_page is not None:
+                    page = next_page
+                    continue
                 for gift in (r for r in page.task_rows() if r["key"] == "gift"
                              and r["current"] >= r["total"]):
                     self.event("跳过礼包", progress=gift["current"],
@@ -937,6 +1390,8 @@ class Runner:
             if rounds >= MAX_TASK_ROUNDS:
                 raise RuntimeError("达到执行次数上限，列表仍有待执行任务")
             rounds += 1
+            scan = {}
+            self._scan_handoff = None
             row = candidates[0]
             attempted.add((*self.task_identity(row), row["current"]))
             if row["key"] == "gift":
@@ -961,7 +1416,7 @@ class Runner:
             time.sleep(1)
             self.browse(self.perceive())
             page = self.return_list()
-            after = self.task_row(page, row)
+            page, after = self.verify_task_return(page, row)
             if after is None and row["current"] < row["total"] - 1:
                 # 名称匹配和异步加载分开处理；不重复进入、不把缺失本身记为完成。
                 for attempt in range(2):
@@ -997,58 +1452,71 @@ class Runner:
                            titles=[s for s in page.texts if PROGRESS.match(s)], xml=str(snapshot))
                 raise RuntimeError("返回后任务身份未匹配，未确认次数；已记录当前任务标题和XML")
             result = {"task": row["name"], "key": row["key"], "before": row["current"],
+                      "reward": row.get("reward"),
                       "task_after": after["name"] if after is not None else None,
                       "after": current, "total": row["total"], "evidence": evidence,
                       "reward_messages": reward}
             self.results.append(result)
             self.event("任务完成", **result)
+            scan = self.consume_scan_handoff(page)
 
-    def execute_alipay(self, page):
+    def execute_alipay(self, page, only=None):
         """按当前列表调度，先做可点击任务；每次滚动和任务返回后重新匹配。"""
+        if self.run_scope["mode"] == "unspecified":
+            self.set_run_scope("single_task" if only is not None else "full",
+                               [only[0]] if only is not None else None)
         handlers = {"goodies": self.execute_goodies, "featured": self.execute_featured,
                     "instant": self.execute_instant, "insurance": self.execute_insurance,
-                    "saving": self.execute_saving}
+                    "saving": self.execute_saving, "home_farm": self.execute_home_farm,
+                    "gold_visit": self.execute_gold_visit, "home_gold": self.execute_home_gold}
         attempted = set()
-        scan_steps = 0
+        scan = {}
         while True:
             if not page.task_list:
                 raise RuntimeError("调度时已离开支付宝任务列表，停止操作")
+            self.observe_tasks(page)
+            if only is not None and only[0] in attempted:
+                return page
             candidates = [r for r in page.task_rows()
                           if r["key"] in handlers and r["key"] not in attempted
+                          and (only is None or (r["key"], r["total"]) == only)
                           and r["button"] is not None
                           and r["button"].get("enabled") != "false"
                           and r["button"].get("text") in ("去完成", "去逛逛", "继续逛", "领取")
                           and (r["current"] < r["total"]
+                               # 分段首笔到账就可能变为1/1，仍检查“继续逛”中的剩余奖励。
+                               or (r["key"] == "goodies"
+                                   and r["button"].get("text") == "继续逛")
                                or r["button"].get("text") == "领取")]
-            if not candidates:
-                self.event("扫描结束", reason="当前列表没有尚未执行的支持任务")
-                return page
             row = next((r for r in candidates if page.task_tappable(r["title"])
                         and page.task_tappable(r["button"])), None)
             if row is not None:
                 attempted.add(row["key"])
-                scan_steps = 0
+                scan = {}
                 self.event("匹配当前列表任务", task=row["name"])
                 try:
                     page = handlers[row["key"]](page)
                 except TaskUnavailable as exc:
                     page = exc.page
                     self.event("跳过任务", task=row["name"], reason=str(exc))
+                except TaskVerificationFailed as exc:
+                    # 本轮不重试该任务或再次领奖，只在新快照确认列表后继续别的任务。
+                    page = self.recover_verification_failure(row, exc)
                 continue
-            # 只有屏外还有支持任务才滚动，不为每一种处理器分别来回寻找。
-            if scan_steps >= 14:
-                self.event("扫描结束", reason="滚动后仍无可点击的支持任务")
+            next_page = self.scan_task_page(page, scan)
+            if next_page is None:
+                # 扫描结束不等于全部完成；明确记录仍未执行的任务，方便解释漏跑原因。
+                pending = [r for r in page.task_rows() if r["key"] in handlers
+                           and r["key"] not in attempted and r["current"] < r["total"]]
+                if pending:
+                    snapshot = self.directory / f"alipay-unavailable-{time.time_ns()}.xml"
+                    snapshot.write_bytes(ET.tostring(page.root, encoding="utf-8"))
+                    for task in pending:
+                        self.event("跳过任务", task=task["name"], current=task["current"],
+                                   total=task["total"], reason="双向扫描后入口仍不可定位",
+                                   xml=str(snapshot))
                 return page
-            down = scan_steps >= 7
-            if isinstance(self.adb, ADB) and not self.adb.use_live_ui:
-                self.adb.use_live_ui = True
-                observed = self.adb.page()
-                if not observed.in_app:
-                    raise RuntimeError("滚动前已离开目标应用，停止扫描")
-            self.event("滚动扫描任务", direction="down" if down else "up")
-            self.adb.swipe(page, down=down, task_list=True)
-            scan_steps += 1
-            page = self.wait_page(lambda p: p.task_list, "滚动后的任务列表", timeout=20)
+            page = next_page
 
     def browse_instant(self, page, amount):
         """只滑动推进单次浏览，零秒和浮标消失均不作为发放成功的依据。"""
@@ -1061,11 +1529,12 @@ class Runner:
             if state["issued"]:
                 return page, state
             self.adb.swipe(page)
-            page = self.perceive()
+            page = self.perceive_active_browse(page)
         raise RuntimeError("单次浏览超时，未读到奖励已发放")
 
     def execute_instant(self, page):
         """单次奖励与分段任务隔离；完成后不重复点击“继续逛”。"""
+        self.begin_task_scope("instant", page)
         row = next((r for r in page.task_rows() if r["key"] == "instant"), None)
         if row is None:
             self.event("跳过任务", task=ALIPAY_TASKS["instant"][0], reason="任务未出现")
@@ -1091,11 +1560,26 @@ class Runner:
         _, state = self.browse_instant(page, amount)
         page = self.return_list()
         after = self.task_row(page, row)
+        # 返回动画期间列表可能先报告旧的0/1；仅重新读取，不重进任务或重复浏览。
+        for attempt in range(5):
+            if after is None or after["current"] == after["total"]:
+                break
+            self.event("等待单次任务进度刷新", task=row["name"], attempt=attempt + 1,
+                       current=after["current"], total=after["total"])
+            time.sleep(1)
+            page = self.perceive()
+            if not page.task_list:
+                raise RuntimeError("等待单次任务进度刷新时离开任务列表，保留页面")
+            after = self.task_row(page, row)
         details = {"displayed_amount": amount, "browse_signals": state["signals"],
                    "browse_already_issued": already_issued}
         if after is not None:
             if after["current"] != after["total"]:
-                raise RuntimeError("单次浏览已发放，但返回农场后任务进度未完成")
+                snapshot = self.directory / f"instant-progress-unmatched-{time.time_ns()}.xml"
+                snapshot.write_bytes(ET.tostring(page.root, encoding="utf-8"))
+                self.event("单次任务进度未完成", task=row["name"], current=after["current"],
+                           total=after["total"], xml=str(snapshot))
+                raise TaskVerificationFailed(f"单次浏览已发放，但返回农场后任务进度未完成；已保存XML：{snapshot}")
             after_button = after["button"].get("text") if after["button"] is not None else None
             if after_button == "领取":
                 return self.claim_alipay(page, "instant", row["current"], button_text,
@@ -1105,7 +1589,7 @@ class Runner:
             time.sleep(0.5)
             page = self.perceive()
             if not page.task_list or self.task_row(page, row) is not None:
-                raise RuntimeError("单次立得任务移除状态未稳定")
+                raise TaskVerificationFailed("单次立得任务移除状态未稳定")
             after_button = "任务已移除"
             evidence = "专属浮标已发放，返回后连续两次确认任务移除"
         if already_issued:
@@ -1181,6 +1665,11 @@ class Runner:
                              and c["coordinates_valid"]
                              and page.task_tappable(c["button"]) and page.task_tappable(c["label"])), None)
                 if card is not None:
+                    if page.browse_motion_since_capture:
+                        # 并发采集时坐标可能来自滚动前；先停止维持滑动并同步刷新，再决定点击。
+                        self.event("刷新浏览卡片坐标", reason="采集期间发生滑动，旧坐标不可点击")
+                        page = self.perceive()
+                        continue
                     page, reward = self.claim_goodies_card(page, card)
                     card_ids.add(card["id"])
                     new_card_rewards.append(reward)
@@ -1220,7 +1709,8 @@ class Runner:
                 stable_done = 0
                 self.adb.swipe(page)
             previous = state
-            page = self.perceive()
+            page = (self.perceive() if state["completed"] or state["all_claimed"]
+                    else self.perceive_active_browse(page))
         if stable_done >= 2 and scan_cards:
             self.event("现身卡片扫描结束", reason="达到扫描时间上限", confirmed=len(card_ids),
                        new_claims=len(new_card_rewards))
@@ -1229,6 +1719,7 @@ class Runner:
 
     def execute_featured(self, page):
         """核验精选商品的分段奖励和农场多次进度；每轮重新读取，不按入口点击次数记成功。"""
+        self.begin_task_scope("featured", page)
         for attempt in range(MAX_TASK_ROUNDS):
             row = next((r for r in page.task_rows() if r["key"] == "featured"), None)
             if row is None:
@@ -1266,17 +1757,17 @@ class Runner:
                 if row["current"] != row["total"] - 1:
                     snapshot = self.directory / f"featured-unmatched-{time.time_ns()}.xml"
                     snapshot.write_bytes(ET.tostring(page.root, encoding="utf-8"))
-                    raise RuntimeError("精选商品任务未到最后一次却消失，未确认完成；已保存XML")
+                    raise TaskVerificationFailed("精选商品任务未到最后一次却消失，未确认完成；已保存XML")
                 time.sleep(0.5)
                 page = self.perceive()
                 if not page.task_list or self.task_row(page, row) is not None:
-                    raise RuntimeError("精选商品任务移除状态未稳定")
+                    raise TaskVerificationFailed("精选商品任务移除状态未稳定")
                 current, after_button = row["total"], "任务已移除"
                 evidence = "分段奖励完成，返回农场后最后一次任务连续两次移除"
             else:
                 current = after["current"]
                 if not row["current"] < current <= row["total"]:
-                    raise RuntimeError("精选商品浏览奖励已完成，但农场任务进度未增加或异常")
+                    raise TaskVerificationFailed("精选商品浏览奖励已完成，但农场任务进度未增加或异常")
                 after_button = after["button"].get("text") if after["button"] is not None else None
                 if current == row["total"] and after_button == "领取":
                     return self.claim_alipay(page, "featured", row["current"], button_text,
@@ -1293,6 +1784,8 @@ class Runner:
         raise RuntimeError("精选商品任务达到执行次数上限，仍有待执行进度")
 
     def execute_goodies(self, page):
+        """执行分段浏览并核验农场进度，直接调用时明确标记为单项范围。"""
+        self.begin_task_scope("goodies", page)
         row = next((r for r in page.task_rows() if r["key"] == "goodies"), None)
         if row is None:
             self.event("跳过任务", task=ALIPAY_TASKS["goodies"][0], reason="任务未出现")
@@ -1316,6 +1809,18 @@ class Runner:
             self.event("跳过任务", task=row["name"], reason="浏览页今日任务此前已完成或奖励已全部领取")
             return page
         after = self.task_row(page, row)
+        # 分段浏览发放与农场计数可能异步更新；只重读，不再次进入或重复领取。
+        for attempt in range(5):
+            if after is None or after["current"] == after["total"]:
+                break
+            self.event("等待逛好物进度刷新", task=row["name"], attempt=attempt + 1,
+                       current=after["current"], total=after["total"])
+            time.sleep(0.5)
+            page = self.perceive()
+            if not page.task_list:
+                raise RuntimeError("等待逛好物进度刷新时离开任务列表")
+            self.observe_tasks(page)
+            after = self.task_row(page, row)
         if after is not None and after["current"] == after["total"]:
             after_button = after["button"].get("text") if after["button"] is not None else None
             if after_button == "领取":
@@ -1325,9 +1830,13 @@ class Runner:
             time.sleep(0.5)
             page = self.perceive()
             if not page.task_list or self.task_row(page, row) is not None:
-                raise RuntimeError("逛好物返回后任务移除状态未稳定")
+                raise TaskVerificationFailed("逛好物返回后任务移除状态未稳定")
         else:
-            raise RuntimeError("逛好物奖励已领取，但农场任务进度未完成")
+            snapshot = self.directory / f"goodies-progress-unmatched-{time.time_ns()}.xml"
+            snapshot.write_bytes(ET.tostring(page.root, encoding="utf-8"))
+            self.event("逛好物进度未完成", task=row["name"], current=after["current"],
+                       total=after["total"], xml=str(snapshot))
+            raise TaskVerificationFailed(f"逛好物奖励已领取，但农场任务进度未完成；已保存XML：{snapshot}")
         if (row["current"] >= row["total"] and not details["new_rewards"]
                 and not details.get("new_card_rewards")):
             self.event("跳过任务", task=row["name"], reason="农场此前已完成，未观察到本次新增分段奖励")
@@ -1392,6 +1901,8 @@ class Runner:
         raise RuntimeError("省钱会场返回任务列表超时")
 
     def execute_saving(self, page):
+        """执行省钱会场并通过公共领奖核验记录结果。"""
+        self.begin_task_scope("saving", page)
         row = next((r for r in page.task_rows() if r["key"] == "saving"), None)
         if row is None:
             self.event("跳过任务", task="逛一逛省钱会场", reason="任务未出现")
@@ -1441,7 +1952,117 @@ class Runner:
         return self.claim_alipay(page, "saving", original, button_text,
                                  product_clicks=product_clicks)
 
+    def execute_home_farm(self, page):
+        """从任务入口打开首页服务引导，再访问农场并核验领奖。"""
+        return self.execute_alipay_visit(page, "home_farm")
+
+    def execute_gold_visit(self, page):
+        """只访问金豆会场并返回，不点击待领取金豆、兑换或抽奖入口。"""
+        return self.execute_alipay_visit(page, "gold_visit")
+
+    def execute_home_gold(self, page):
+        """经引导返回支付宝首页，通过常用入口访问金豆，再回农场领奖。"""
+        return self.execute_alipay_visit(page, "home_gold")
+
+    def open_common_app(self, page, label):
+        """仅经原生首页常用区或其全部列表进入应用，缺失时保留可返回的现场。"""
+        node = page.common_app(label)
+        if node is None and page.alipay_home:
+            all_apps = page.entry("全部")
+            if all_apps is not None:
+                self.adb.tap(all_apps)
+                page = self.wait_page(lambda p: p.has("最近常用应用"), "首页最近常用应用")
+                node = page.common_app(label)
+        if node is None:
+            raise TaskUnavailable(f"首页常用区未找到{label}，需先在支付宝配置该入口", page)
+        self.event("从首页常用访问应用", target=label, bounds=node.get("bounds"))
+        self.adb.tap(node)
+
+    def return_alipay_farm(self):
+        """金豆可返回农场或首页；只沿这两条实测路径找回农场任务列表。"""
+        for _ in range(6):
+            page = self.perceive()
+            if page.task_list:
+                return page
+            if self.list_entry(page) is not None:
+                return self.enter_list()
+            if page.alipay_home or page.has("最近常用应用"):
+                self.open_common_app(page, "芭芭农场")
+                self.wait_page(lambda p: self.list_entry(p) is not None, "返回的农场首页")
+                return self.enter_list()
+            if page.gold_venue:
+                self.adb.back()
+                time.sleep(1)
+                continue
+            raise RuntimeError("访问任务返回路径未识别，保留页面")
+        raise RuntimeError("访问任务返回农场超时")
+
+    def execute_alipay_visit(self, page, key):
+        """访问类任务独立记账；必须回到农场确认1/1，再通过公共流程核验领取。"""
+        self.begin_task_scope(key, page)
+        row = next((r for r in page.task_rows() if r["key"] == key), None)
+        if row is None:
+            self.event("跳过任务", task=ALIPAY_TASKS[key][0], reason="任务未出现")
+            return page
+        if row["button"] is not None and row["button"].get("text") in ("已领取", "已完成"):
+            self.event("跳过任务", task=row["name"], reason="此前已完成")
+            return page
+        original = row["current"]
+        page, row = self.reveal(page, row)
+        button_text = row["button"].get("text")
+        if row["total"] != 1:
+            raise TaskUnavailable("访问任务总次数不是已验证的1次", page)
+        if row["current"] < row["total"]:
+            if button_text != "去完成":
+                raise TaskUnavailable("访问任务没有可执行的去完成入口", page)
+            self.event("进入任务", task=row["name"], before=original, button_before=button_text)
+            self.adb.tap(row["button"])
+            if key == "home_farm":
+                destination = self.wait_page(lambda p: p.farm_home_service or p.alipay_home,
+                                             "首页访问农场引导")
+                if destination.farm_home_service:
+                    self.adb.tap(destination.entry("芭芭农场"))
+                else:
+                    self.open_common_app(destination, "芭芭农场")
+                self.wait_page(lambda p: self.list_entry(p) is not None, "首页访问后的农场")
+            elif key == "home_gold":
+                destination = self.wait_page(lambda p: p.entry("从常用访问金豆") is not None
+                                             or p.alipay_home, "首页访问金豆引导")
+                if not destination.alipay_home:
+                    self.adb.tap(destination.entry("从常用访问金豆"))
+                    destination = self.wait_page(lambda p: p.alipay_home, "支付宝原生首页")
+                try:
+                    self.open_common_app(destination, "金豆夺宝")
+                except TaskUnavailable as exc:
+                    # 缺少首页入口是可跳过任务，先回农场再交回调度器，不能留在外页继续做任务。
+                    page = self.return_alipay_farm()
+                    raise TaskUnavailable(str(exc), page) from exc
+                self.wait_page(lambda p: p.gold_venue, "首页访问金豆会场")
+            else:
+                self.wait_page(lambda p: p.gold_venue, "金豆夺宝会场")
+            page = self.return_alipay_farm()
+            # 用实时位置找回原任务，避免屏外旧进度阻止领奖，也不凭停留时间认定完成。
+            fresh = self.task_row(page, row)
+            if fresh is None:
+                raise TaskVerificationFailed(f"返回后未找到{row['name']}，不能确认访问完成")
+            page, fresh = self.reveal(page, fresh)
+            for attempt in range(5):
+                if fresh["current"] == fresh["total"]:
+                    break
+                self.event("等待访问任务进度", task=row["name"], attempt=attempt + 1)
+                time.sleep(1)
+                page = self.perceive()
+                if not page.task_list:
+                    raise RuntimeError("等待访问任务进度时离开任务列表")
+                fresh = self.task_row(page, row)
+                if fresh is None:
+                    raise TaskVerificationFailed("访问任务暂时缺失，不能确认完成")
+        return self.claim_alipay(page, key, original, button_text, allow_removed=True,
+                                 visit_route=key, visit_verified=original < row["total"])
+
     def execute_insurance(self, page):
+        """浏览车险搜索页，回农场后核验进度及领奖。"""
+        self.begin_task_scope("insurance", page)
         row = next((r for r in page.task_rows() if r["key"] == "insurance"), None)
         if row is None:
             self.event("跳过任务", task="搜一搜「车险」", reason="任务未出现")
@@ -1480,14 +2101,17 @@ class Runner:
                                  allow_removed=True, browse_signals=signals)
 
     def claim_alipay(self, page, key, original, button_text, allow_removed=False, **details):
+        """只在确认的列表中领取；进度或领奖无法核验时交给调度器隔离失败。"""
+        if not page.task_list:
+            raise RuntimeError("领奖前未确认支付宝任务列表，停止操作")
         name = ALIPAY_TASKS[key][0]
         row = next((r for r in page.task_rows() if r["key"] == key), None)
         if row is None or row["current"] != row["total"]:
-            raise RuntimeError(f"返回农场后{name}任务进度未完成")
+            raise TaskVerificationFailed(f"返回农场后{name}任务进度未完成")
         page, row = self.reveal(page, row)
         button = row["button"]
         if button is None or button.get("text") != "领取":
-            raise RuntimeError(f"{name}已完成但未找到领取按钮，不记为已领取")
+            raise TaskVerificationFailed(f"{name}已完成但未找到领取按钮，不记为已领取")
         self.event("领取任务奖励", task=row["name"], button_before="领取")
         self.adb.tap(button)
         missing = 0
@@ -1514,14 +2138,50 @@ class Runner:
                 self.event("任务完成", **result)
                 return page
             time.sleep(1)
-        raise RuntimeError(f"{name}奖励领取状态未确认")
+        raise TaskVerificationFailed(f"{name}奖励领取状态未确认")
 
     def summary(self, error=None):
-        summary = {"app": self.app, "status": "error" if error else "ok", "error": error,
+        # 结果是本轮已核验动作的最终依据，旧快照不能把已完成任务重新列为待办。
+        observations = {identity: dict(item) for identity, item in self.task_observations.items()}
+        for result in self.results:
+            for identity, item in observations.items():
+                if (item["key"] == result["key"] and item["total"] == result.get("total")
+                        and (self.app == "alipay" or item.get("reward") == result.get("reward"))):
+                    item["current"] = max(item["current"], result["after"])
+                    item["button"] = result.get("button_after")
+        pending = [item for item in observations.values()
+                   if item["current"] < item["total"] or item["button"] == "领取"]
+        incomplete = any(report["outcome"] != "complete" for report in self.scan_reports)
+        coverage = ("incomplete" if incomplete else
+                    "complete" if any(r["purpose"] == "schedule" for r in self.scan_reports) else
+                    "task_verification_only" if self.scan_reports else "not_scanned")
+        mode = self.run_scope["mode"]
+        scoped_pending = [item for item in pending if item["key"] in self.run_scope["task_keys"]]
+        full_complete = (mode == "full" and coverage == "complete"
+                         and not error and not incomplete and not pending and not self.failed_tasks)
+        if error:
+            status = "error"
+        elif incomplete or self.failed_tasks:
+            status = "partial"
+        elif mode == "verification":
+            status = "verification_ok"
+        elif mode == "single_task":
+            status = "partial" if scoped_pending else "single_task_ok"
+        elif mode in ("inspect", "navigate", "scan_only"):
+            status = {"inspect": "inspected", "navigate": "navigated", "scan_only": "scanned"}[mode]
+        else:
+            status = "partial" if pending or (mode == "full" and not full_complete) else "ok"
+        summary = {"app": self.app, "status": status, "error": error,
                    "completed_rounds": len(self.results),
                    "browse_rounds": sum(r["key"] != "gift" for r in self.results),
                    "gift_claims": sum(r["key"] == "gift" for r in self.results),
-                   "results": self.results}
+                   "results": self.results,
+                   "run_scope": dict(self.run_scope),
+                   "all_supported_tasks_complete": full_complete,
+                   "failed_tasks": self.failed_tasks,
+                   "scan_coverage": {"status": coverage, "reports": self.scan_reports},
+                   "pending_tasks": pending, "skipped_tasks": self.skipped_tasks,
+                   "unsupported_tasks": list(self.unsupported_observations.values())}
         (self.directory / "summary.json").write_text(
             json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         self.event("本次汇总", **summary)
@@ -1548,6 +2208,7 @@ def main():
                         handlers=[logging.StreamHandler(),
                                   logging.FileHandler(directory / "run.log", encoding="utf-8")])
     runner = Runner(ADB(args.serial, args.app), directory, args.task_timeout, args.app)
+    runner.set_run_scope("inspect" if args.inspect else "navigate" if args.navigate_only else "full")
     error = None
     try:
         runner.adb.connect()
@@ -1555,6 +2216,7 @@ def main():
             "navigate" if args.navigate_only else "run"), logs=str(directory))
         if args.inspect:
             page = runner.perceive()
+            runner.observe_tasks(page)
             (directory / "page.xml").write_bytes(ET.tostring(page.root, encoding="utf-8"))
             runner.event("页面检查", task_list=page.task_list, browse_state=page.browse_state(),
                          tasks=[{**{k: v for k, v in r.items() if k not in ("title", "button")},

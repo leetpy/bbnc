@@ -99,7 +99,8 @@ class FeaturedTests(unittest.TestCase):
             runner.execute_featured(farm_page(2))
             self.assertEqual(runner.claim_alipay.call_args.args[1], 'featured')
 
-    def test_unavailable_featured_does_not_block_next_task(self):
+    @patch.object(Runner, "scan_task_page", return_value=None)
+    def test_unavailable_featured_does_not_block_next_task(self, scan_page):
         with tempfile.TemporaryDirectory() as directory:
             runner = self.runner(directory)
             page = farm_page()

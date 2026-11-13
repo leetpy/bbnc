@@ -1,0 +1,44 @@
+<hierarchy>
+  <node package="com.eg.android.AlipayGphone" bounds="[0,0][1080,2400]">
+    <node>
+      <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.view.View" bounds="[0,0][1080,348]" clickable="false" enabled="true">
+        <node text="浏览得奖励" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[90,168][324,216]" clickable="false" enabled="true" />
+        <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.view.View" bounds="[528,162][675,291]" clickable="false" enabled="true">
+          <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[543,162][594,213]" clickable="false" enabled="true" />
+          <node text="500" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[594,168][660,207]" clickable="false" enabled="true" />
+          <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.view.View" bounds="[594,225][612,243]" clickable="false" enabled="true">
+            <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[612,234][894,240]" clickable="false" enabled="true" />
+          </node>
+          <node text="15s后领取" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[531,258][675,291]" clickable="false" enabled="true" />
+          <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[723,240][783,300]" clickable="false" enabled="true" />
+        </node>
+        <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.view.View" bounds="[831,162][978,291]" clickable="false" enabled="true">
+          <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[846,162][894,213]" clickable="false" enabled="true" />
+          <node text="750" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[894,168][960,207]" clickable="false" enabled="true" />
+          <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[894,225][912,243]" clickable="false" enabled="true" />
+          <node text="第2次" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[861,258][945,291]" clickable="false" enabled="true" />
+        </node>
+      </node>
+      <node text="浏览得奖励" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[90,168][324,216]" clickable="false" enabled="true" />
+      <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.view.View" bounds="[0,0][1080,504]" clickable="false" enabled="true">
+        <node text="滑动浏览或查看商品得肥料" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[57,258][348,375]" clickable="false" enabled="true" />
+        <node text="当前浏览15秒可得500" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[564,192][912,228]" clickable="false" enabled="true" />
+        <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.view.View" bounds="[516,243][663,459]" clickable="false" enabled="true">
+          <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[543,243][639,339]" clickable="false" enabled="true" />
+          <node text="500" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[543,348][639,384]" clickable="false" enabled="true" />
+          <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.view.View" bounds="[582,399][600,417]" clickable="false" enabled="true">
+            <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[600,405][897,411]" clickable="false" enabled="true" />
+          </node>
+          <node text="15s后领取" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[516,426][663,459]" clickable="false" enabled="true" />
+          <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[687,267][750,330]" clickable="false" enabled="true" />
+        </node>
+        <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.view.View" bounds="[861,243][957,459]" clickable="false" enabled="true">
+          <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[861,243][957,339]" clickable="false" enabled="true" />
+          <node text="750" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[861,348][957,384]" clickable="false" enabled="true" />
+          <node text="" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[900,399][918,417]" clickable="false" enabled="true" />
+          <node text="第2次" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[867,426][951,459]" clickable="false" enabled="true" />
+        </node>
+      </node>
+    </node>
+  </node>
+</hierarchy>

@@ -9,6 +9,12 @@ from farm import Page, Runner
 
 
 class TaobaoExtraTests(unittest.TestCase):
+    def setUp(self):
+        # 这些用例只验证任务处理流程；完整逐屏扫描由独立调度回归覆盖。
+        scan = patch.object(Runner, "scan_task_page", return_value=None)
+        self.scan_page = scan.start()
+        self.addCleanup(scan.stop)
+
     def test_takeaway_task_returns_after_browsing_and_verifies_removal(self):
         # 仅验证外卖会场浏览奖励，不点击店铺、加号或下单入口。
         directory_path = Path(__file__).parent / 'tests/fixtures'
@@ -91,6 +97,65 @@ class TaobaoExtraTests(unittest.TestCase):
                 runner.execute(self.page(), only=(key, 1))
                 self.assertEqual([r['key'] for r in runner.results], [key])
                 adb.tap.assert_called_once()
+
+    def test_screenshot_recovers_domestic_task_from_stale_xml(self):
+        # 实机滚动后 XML 仍停留在初始位置，截图已将国货任务滚到中部。
+        page = Page('<hierarchy><node bounds="[0,0][1260,2800]">'
+                    '<node text="肥料明细"/><node bounds="[0,678][1260,2738]">'
+                    '<node class="android.widget.ListView" bounds="[27,0][1238,2470]">'
+                    '<node><node text="浏览国货严选红包抵扣(0/1)" bounds="[283,2514][870,2585]"/>'
+                    '<node text="+200"/><node text="去完成" clickable="true" '
+                    'bounds="[958,2558][1198,2662]"/></node></node></node>'
+                    '<node content-desc="跳转链接" clickable="true" bounds="[27,2494][1238,2703]"/>'
+                    '</node></hierarchy>')
+        self.assertFalse(page.task_tappable(page.task_rows()[0]["button"]))
+        screen = {"width": 1260, "height": 2800, "rows": [
+            {"text": "做任务赚肥料", "confidence": 1, "bounds": [390,561,877,651]},
+            {"text": "浏览国货严选红包抵扣（0/1）", "confidence": 1,
+             "bounds": [284,1086,873,1139]},
+            {"text": "去完成", "confidence": 1, "bounds": [1008,1147,1150,1197]}]}
+        page.apply_task_screen(screen)
+        row = page.task_rows()[0]
+        self.assertEqual(row["key"], "domestic")
+        self.assertEqual(row["button"].get("bounds"), "[1008,1147][1150,1197]")
+        self.assertTrue(page.task_tappable(row["title"]))
+        self.assertTrue(page.task_tappable(row["button"]))
+        # 截图中未出现的旧任务不能继续参与调度，也不能错误确认奖励。
+        screen["rows"] = screen["rows"][:1]
+        page.apply_task_screen(screen)
+        self.assertFalse(page.task_tappable(page.task_rows()[0]["button"]))
+
+    def test_return_verification_searches_offscreen_task_before_using_progress(self):
+        # 当前截图未看到任务时，旧 XML 的 0/1 既不能导致误报，也不能当成任务移除。
+        first, second = self.page(), self.page()
+        row = next(r for r in first.task_rows() if r["key"] == "domestic")
+        header = {"text":"做任务赚肥料","confidence":1,"bounds":[390,561,877,651]}
+        first.apply_task_screen({"width":1260,"height":2800,"rows":[header,
+            {"text":"买限时折扣好物得奖励(0/1)","confidence":1,"bounds":[284,800,873,850]}]})
+        second.apply_task_screen({"width":1260,"height":2800,"rows":[header,
+            {"text":"浏览国货严选红包抵扣(1/1)","confidence":1,
+             "bounds":[284,1086,873,1139]},
+            {"text":"已完成","confidence":1,"bounds":[1008,1147,1150,1197]}]})
+        self.assertIsNone(Runner.task_row(first, row))
+        with tempfile.TemporaryDirectory() as directory:
+            runner = Runner(Mock(), Path(directory), 10)
+            self.scan_page.return_value = second
+            page, after = runner.verify_task_return(first, row)
+            self.assertIs(page, second)
+            self.assertEqual(after["current"], 1)
+            self.scan_page.assert_called_once()
+
+    def test_screen_requires_matching_panel_and_same_row_button(self):
+        page = self.page()
+        with self.assertRaisesRegex(RuntimeError, "任务面板"):
+            page.apply_task_screen({"width":1260,"height":2800,"rows":[]})
+        screen = {"width":1260,"height":2800,"rows":[
+            {"text":"肥料明细","confidence":1,"bounds":[30,580,230,630]},
+            {"text":"浏览国货严选红包抵扣(0/1)","confidence":1,
+             "bounds":[284,1086,873,1139]},
+            {"text":"去完成","confidence":1,"bounds":[1008,1371,1150,1424]}]}
+        page.apply_task_screen(screen)
+        self.assertFalse(any(page.task_tappable(r["button"]) for r in page.task_rows()))
 
     def test_footer_overlay_blocks_task_button(self):
         # 横幅与任务按钮在不同分支，二者的坐标可以同时落在屏幕内。

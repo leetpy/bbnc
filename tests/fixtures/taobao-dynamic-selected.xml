@@ -1,0 +1,17 @@
+<hierarchy>
+  <node package="com.taobao.taobao" bounds="[0,0][1260,2800]">
+    <node text="肥料明细" />
+    <node text="" content-desc="" package="com.taobao.taobao" resource-id="" class="android.view.View" bounds="[43,0][1218,-1606]" clickable="true" enabled="true">
+      <node text="" content-desc="" package="com.taobao.taobao" resource-id="" class="android.view.View" bounds="[270,0][961,-1647]" clickable="false" enabled="true">
+        <node text="" content-desc="" package="com.taobao.taobao" resource-id="" class="android.view.View" bounds="[283,0][948,-1711]" clickable="false" enabled="true">
+          <node text="看看#低糖电饭锅(6/18)" content-desc="" package="com.taobao.taobao" resource-id="" class="android.widget.TextView" bounds="[283,0][793,-1711]" clickable="false" enabled="true" />
+        </node>
+        <node text="" content-desc="" package="com.taobao.taobao" resource-id="" class="android.view.View" bounds="[283,0][948,-1647]" clickable="false" enabled="true">
+          <node text="浏览15秒得" content-desc="" package="com.taobao.taobao" resource-id="" class="android.widget.TextView" bounds="[283,0][492,-1647]" clickable="false" enabled="true" />
+          <node text="+900" content-desc="" package="com.taobao.taobao" resource-id="" class="android.widget.TextView" bounds="[556,0][678,-1647]" clickable="false" enabled="true" />
+        </node>
+      </node>
+      <node text="去完成" content-desc="" package="com.taobao.taobao" resource-id="" class="android.widget.Button" bounds="[958,0][1198,-1660]" clickable="true" enabled="true" />
+    </node>
+  </node>
+</hierarchy>

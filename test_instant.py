@@ -14,6 +14,23 @@ def fixture(stage):
 
 
 class InstantTests(unittest.TestCase):
+    @patch("farm.time.sleep")
+    def test_returned_stale_progress_is_rechecked_without_reentering(self, sleep):
+        """已发放后等待农场进度刷新，只点击一次任务入口。"""
+        with tempfile.TemporaryDirectory() as directory:
+            adb = Mock()
+            runner = Runner(adb, Path(directory), 10, app="alipay")
+            runner.wait_page = Mock(return_value=fixture("browsing"))
+            issued = fixture("issued")
+            runner.browse_instant = Mock(return_value=(issued, issued.instant_state()))
+            runner.return_list = Mock(return_value=fixture("before"))
+            runner.perceive = Mock(side_effect=[fixture("before"), fixture("ready")])
+            runner.execute_instant(fixture("before"))
+            self.assertEqual(runner.results[0]["after"], 1)
+            self.assertEqual(runner.perceive.call_count, 2)
+            adb.tap.assert_called_once()
+            adb.swipe.assert_not_called()
+
     def test_dynamic_amount_alias_and_separate_task_identity(self):
         source = (Path(__file__).parent / "tests/fixtures/instant-before.xml").read_text(encoding="utf-8")
         for name in ("逛好物立得1000肥料", "浏览好物立得2000肥料"):
@@ -63,15 +80,19 @@ class InstantTests(unittest.TestCase):
             adb.tap.assert_called_once()  # 只点去完成，不点商品或额外领奖。
             self.assertEqual(adb.swipe.call_count, 2)
 
-    def test_returned_progress_not_complete_is_not_success(self):
+    @patch("farm.time.sleep")
+    def test_returned_progress_not_complete_is_not_success(self, sleep):
         with tempfile.TemporaryDirectory() as directory:
             adb = Mock()
             runner = Runner(adb, Path(directory), 10, app="alipay")
             runner.wait_page = Mock(return_value=fixture("issued"))
             runner.return_list = Mock(return_value=fixture("before"))
+            runner.perceive = Mock(return_value=fixture("before"))
             with self.assertRaisesRegex(RuntimeError, "任务进度未完成"):
                 runner.execute_instant(fixture("before"))
             self.assertEqual(runner.results, [])
+            self.assertEqual(runner.perceive.call_count, 5)
+            self.assertEqual(len(list(Path(directory).glob("instant-progress-unmatched-*.xml"))), 1)
 
     def test_completed_continue_row_is_skipped_without_reopening(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -139,7 +160,8 @@ class InstantTests(unittest.TestCase):
                 runner.browse_instant(fixture("issued"), 2000)
             adb.swipe.assert_not_called()
 
-    def test_missing_or_unavailable_instant_does_not_block_other_tasks(self):
+    @patch.object(Runner, "scan_task_page", return_value=None)
+    def test_missing_or_unavailable_instant_does_not_block_other_tasks(self, scan_page):
         with tempfile.TemporaryDirectory() as directory:
             adb = Mock()
             runner = Runner(adb, Path(directory), 10, app="alipay")

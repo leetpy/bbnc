@@ -31,6 +31,66 @@ def panel(*statuses):
 
 
 class GoodiesTests(unittest.TestCase):
+    @patch("farm.time.sleep")
+    def test_returned_old_progress_is_rechecked_before_stopping(self, sleep):
+        """分段领取完成后先等农场刷新，不能凭首次旧进度直接报失败。"""
+        with tempfile.TemporaryDirectory() as directory:
+            before, ready = fixture("before"), fixture("continue")
+            runner = Runner(Mock(), Path(directory), 10, app="alipay")
+            runner.wait_page = Mock(return_value=fixture("entry"))
+            runner.browse_goodies = Mock(return_value=(fixture("completed"), {"new_rewards": []}))
+            runner.return_list = Mock(return_value=before)
+            runner.perceive = Mock(side_effect=[before, ready])
+            runner.execute_goodies(before)
+            self.assertEqual(runner.results[0]["after"], 1)
+            self.assertEqual(runner.perceive.call_count, 2)
+
+    @patch("farm.time.sleep")
+    def test_permanently_pending_progress_is_saved_and_not_counted(self, sleep):
+        """重读仍是0/1时保留XML并停止，不能把浏览页已发放直接算作农场完成。"""
+        with tempfile.TemporaryDirectory() as directory:
+            before = fixture("before")
+            runner = Runner(Mock(), Path(directory), 10, app="alipay")
+            runner.wait_page = Mock(return_value=fixture("entry"))
+            runner.browse_goodies = Mock(return_value=(fixture("completed"), {"new_rewards": []}))
+            runner.return_list = Mock(return_value=before)
+            runner.perceive = Mock(return_value=before)
+            with self.assertRaisesRegex(RuntimeError, "进度未完成"):
+                runner.execute_goodies(before)
+            self.assertEqual(runner.results, [])
+            self.assertEqual(runner.perceive.call_count, 5)
+            self.assertEqual(len(list(Path(directory).glob("goodies-progress-unmatched-*.xml"))), 1)
+
+    @patch.object(Runner, "scan_task_page", return_value=None)
+    def test_scheduler_checks_remaining_rewards_at_completed_farm_progress(self, scan):
+        """农场1/1不代表分段全部领取，“继续逛”仍需检查一次。"""
+        with tempfile.TemporaryDirectory() as directory:
+            page = fixture("continue")
+            runner = Runner(Mock(), Path(directory), 10, app="alipay")
+            runner.execute_goodies = Mock(return_value=page)
+            runner.execute_alipay(page)
+            runner.execute_goodies.assert_called_once_with(page)
+
+    def test_current_browse_hint_real_pages_are_recognized(self):
+        """回放新版提示及重复顶栏，负坐标不影响只读奖励识别。"""
+        for name, claimed in (("current-entry", 0), ("current-first", 1)):
+            with self.subTest(name=name):
+                state = fixture(name).goodies_state()
+                self.assertIsNotNone(state)
+                self.assertEqual([s["amount"] for s in state["stages"]], [500, 750])
+                self.assertEqual(state["claimed"], claimed)
+                self.assertFalse(state["all_claimed"])
+
+    def test_current_hint_in_product_area_does_not_identify_reward_panel(self):
+        """新版提示须与浏览说明同栏，且紧邻导航标题，避免误读商品广告。"""
+        page = fixture("current-first")
+        hint = next(n for n in page.nodes if n.get("text") == "当前浏览30秒可得750")
+        panel_node = page.parents[hint]
+        page.parents[panel_node].remove(panel_node)
+        ET.SubElement(page.root[0], "node").append(panel_node)
+        page = Page(ET.tostring(page.root, encoding="unicode"), APPS["alipay"]["package"])
+        self.assertIsNone(page.goodies_state())
+
     def test_task_amount_is_dynamic_and_other_family_is_separate(self):
         for amount in (1500, 2500):
             source = (Path(__file__).parent / "tests/fixtures/goodies-before.xml").read_text()
@@ -183,7 +243,8 @@ class GoodiesTests(unittest.TestCase):
             adb.tap.assert_not_called()
             self.assertEqual(runner.results, [])
 
-    def test_unavailable_goodies_does_not_block_other_tasks(self):
+    @patch.object(Runner, "scan_task_page", return_value=None)
+    def test_unavailable_goodies_does_not_block_other_tasks(self, scan_page):
         with tempfile.TemporaryDirectory() as directory:
             page = fixture("before")
             runner = Runner(Mock(), Path(directory), 10, app="alipay")

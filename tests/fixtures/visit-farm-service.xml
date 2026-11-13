@@ -1,0 +1,11 @@
+<hierarchy>
+  <node package="com.eg.android.AlipayGphone" bounds="[0,0][1080,2400]">
+    <node text="请访问首页服务" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.webkit.WebView" bounds="[0,264][1080,2346]" clickable="false" enabled="true" />
+    <node text="芭芭农场" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.Image" bounds="[711,717][801,807]" clickable="false" enabled="true" />
+    <node text="芭芭农场" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[660,822][852,858]" clickable="false" enabled="true" />
+    <node text="点击这里，访问「芭芭农场」" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[525,969][1050,1011]" clickable="false" enabled="true" />
+    <node text="芭芭农场" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.Image" bounds="[720,717][792,792]" clickable="false" enabled="true" />
+    <node text="芭芭农场" content-desc="" package="com.eg.android.AlipayGphone" resource-id="" class="android.widget.TextView" bounds="[660,819][852,858]" clickable="false" enabled="true" />
+    <node text="请访问首页服务" content-desc="" package="com.eg.android.AlipayGphone" resource-id="com.alipay.multiplatform.phone.xriver_integration:id/textView_title" class="android.widget.TextView" bounds="[114,153][492,231]" clickable="true" enabled="true" />
+  </node>
+</hierarchy>
