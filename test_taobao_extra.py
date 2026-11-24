@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 import xml.etree.ElementTree as ET
 
 from farm import Page, Runner
+from test_farm import make_page
 
 
 class TaobaoExtraTests(unittest.TestCase):
@@ -50,6 +51,25 @@ class TaobaoExtraTests(unittest.TestCase):
         self.assertEqual(rows[1]['button'].get('text'), '去逛逛')
         self.assertEqual([r['reward'] for r in rows], ['+300', '+300', '+200', '+300'])
 
+    @patch("farm.time.sleep")
+    def test_red_signin_uses_timed_visit_then_checks_farm(self, sleep):
+        # 签到会场还有提现和签到按钮；仅滑动浏览，进度须回农场确认。
+        venue = Page('<hierarchy><node package="com.taobao.taobao" bounds="[0,0][1260,2800]">'
+                     '<node text="红包签到领现金" bounds="[141,165][1117,229]"/>'
+                     '<node text="连续签到奖励(2/28)"/><node text="立即签到"/></node></hierarchy>')
+        before = make_page("去红包签到得肥料", 0, 1)
+        removed = make_page("其他任务", 0, 1)
+        with tempfile.TemporaryDirectory() as directory:
+            runner = Runner(Mock(), Path(directory), 90)
+            runner.adb.page.return_value = venue
+            runner.perceive = Mock(side_effect=[venue, removed])
+            runner.return_list = Mock(return_value=removed)
+            runner.execute(before, only=("red_signin", 1))
+            sleep.assert_any_call(10)
+            runner.adb.tap.assert_called_once_with(before.task_rows()[0]["button"])
+            runner.adb.swipe.assert_called_once_with(venue)
+            self.assertIn("签到会场浏览10秒", runner.results[0]["evidence"])
+
     def test_ip_only_list_and_real_completion_signals(self):
         # 任务仅剩“去逛逛”入口时，仍能识别列表；实机完成浮标无需额外点击。
         page = self.page()
@@ -78,6 +98,28 @@ class TaobaoExtraTests(unittest.TestCase):
         xml = ET.tostring(before.root, encoding='unicode').replace('狂享20亿(0/1)', '狂享30亿(1/1)')
         row = Runner.task_row(Page(xml), before.task_rows()[0])
         self.assertEqual(row['current'], 1)
+
+    @patch("farm.time.sleep")
+    def test_regular_coins_browse_is_independent_of_promo(self, sleep):
+        # 两个入口都可能是单次、+300；只操作常规任务，并用它自己的进度核验。
+        xml = '<hierarchy><node package="com.taobao.taobao" bounds="[0,0][1260,2800]"><node text="肥料明细"/>'
+        for index, name in enumerate(("双11来淘金币狂享20亿", "去淘金币逛买更省钱")):
+            y = 800 + index * 240
+            xml += (f'<node><node text="{name}(0/1)" bounds="[280,{y}][900,{y+60}]"/>'
+                    f'<node text="浏览5s得"/><node text="+300"/><node text="去完成" clickable="true" '
+                    f'bounds="[1000,{y}][1150,{y+60}]"/></node>')
+        xml += '</node></hierarchy>'
+        before = Page(xml)
+        after = Page(xml.replace("更省钱(0/1)", "更省钱(1/1)"))
+        with tempfile.TemporaryDirectory() as directory:
+            runner = Runner(Mock(), Path(directory), 10)
+            runner.perceive = Mock(return_value=Page(
+                (Path(__file__).parent / "tests/fixtures/taobao-coins-done.xml").read_text()))
+            runner.return_list = Mock(return_value=after)
+            runner.execute(before, only=("coins_saving", 1))
+            runner.adb.tap.assert_called_once_with(before.task_rows()[1]["button"])
+            self.assertEqual([(r["key"], r["after"], r["reward"]) for r in runner.results],
+                             [("coins_saving", 1, "+300")])
 
     def test_each_task_removed_after_completion_is_verified(self):
         # 模拟浏览成功后单次任务移除；沿用两次列表核验，不直接把消失当成功。

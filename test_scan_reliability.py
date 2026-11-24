@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from farm import Page, Runner
+from farm import Page, Runner, TaskVerificationFailed
 from test_farm import make_page
 
 
@@ -175,6 +175,21 @@ class ScanReliabilityTests(unittest.TestCase):
             runner.verify_task_return(page, make_page(current=5).task_rows()[0])
             self.assertEqual(runner.consume_scan_handoff(page), {})
 
+    def test_unreadable_domestic_button_does_not_block_other_task_verification(self):
+        """国货行的按钮被裁剪时，可以核验另一任务移除，但调度仍须寻找国货入口。"""
+        page = make_page("浏览国货严选红包抵扣", current=0, total=1)
+        page.apply_task_screen(screen([
+            text_row("浏览国货严选红包抵扣(0/1)", [280, 2660, 870, 2720])]))
+        with tempfile.TemporaryDirectory() as directory:
+            runner = Runner(Mock(), Path(directory), 10)
+            runner.wait_page = Mock(return_value=page)
+            _, after = runner.verify_task_return(page, make_page(current=5).task_rows()[0])
+            self.assertIsNone(after)
+            self.assertEqual(runner.scan_reports[-1]["outcome"], "complete")
+            self.assertEqual(runner.consume_scan_handoff(page), {})
+            with self.assertRaisesRegex(RuntimeError, "覆盖未确认"):
+                runner.verify_task_return(page, page.task_rows()[0])
+
     def test_expired_handoff_requires_new_scan(self):
         """覆盖证据只在紧接的调度中有效，超时不能沿用。"""
         page = make_page(current=6)
@@ -187,6 +202,25 @@ class ScanReliabilityTests(unittest.TestCase):
                 runner.verify_task_return(page, make_page(current=5).task_rows()[0])
             with patch("farm.time.monotonic", return_value=21):
                 self.assertEqual(runner.consume_scan_handoff(page), {})
+
+    @patch("farm.time.sleep")
+    def test_schedule_continues_with_gift_after_unverified_browse(self, sleep):
+        """一次返回核验失败后，重新确认列表才领取可用礼包。"""
+        fixtures = Path(__file__).parent / "tests/fixtures"
+        gift = Page((fixtures / "gift-before.xml").read_text())
+        claimed = Page((fixtures / "gift-after.xml").read_text())
+        start = make_page("浏览全场1元淘工厂", current=0, total=1)
+        with tempfile.TemporaryDirectory() as directory:
+            runner = Runner(Mock(), Path(directory), 10)
+            runner.browse = Mock()
+            runner.return_list = Mock(return_value=gift)
+            runner.verify_task_return = Mock(side_effect=TaskVerificationFailed("覆盖未确认"))
+            runner.perceive = Mock(side_effect=[Mock(), gift, claimed])
+            runner.scan_task_page = Mock(return_value=None)
+            runner.execute(start)
+            self.assertEqual([r["key"] for r in runner.results], ["gift"])
+            self.assertEqual(runner.failed_tasks[0]["key"], "factory")
+            self.assertEqual(runner.summary()["status"], "partial")
 
     @patch("farm.time.sleep")
     def test_full_last_task_flow_reuses_scan_after_second_confirmation(self, sleep):

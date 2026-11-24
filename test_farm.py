@@ -511,6 +511,7 @@ class FarmTests(unittest.TestCase):
             adb = Mock()
             runner = Runner(adb, Path(directory), 10)
             before = self.gift_page("before")
+            runner.observe_tasks(before)
             runner.perceive = Mock(return_value=self.gift_page("after"))
             runner.claim_gift(before, before.task_rows()[0])
             adb.tap.assert_called_once()
@@ -519,6 +520,7 @@ class FarmTests(unittest.TestCase):
             self.assertEqual(runner.results[0]["button_before"], "去领取")
             self.assertEqual(runner.results[0]["button_after"], "20点可领")
             self.assertEqual(runner.summary()["gift_claims"], 1)
+            self.assertEqual(runner.summary()["pending_tasks"], [])
 
     def test_gift_future_time_not_clicked_even_if_progress_zero(self):
         with tempfile.TemporaryDirectory() as directory:

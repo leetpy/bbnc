@@ -69,6 +69,39 @@ class AlipayScreenTests(unittest.TestCase):
 
 class AlipayVisitTests(unittest.TestCase):
     @patch("farm.time.sleep")
+    def test_timed_visits_wait_return_and_claim(self, sleep):
+        """两个计时任务均需返回列表读取新进度，整个会场只停留。"""
+        for key, seconds in (("red_packet", 5), ("farm_goods", 15)):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as directory:
+                sleep.reset_mock()
+                runner = Runner(Mock(), Path(directory), 90, app="alipay")
+                before, ready = task_page(key), task_page(key, 1, "领取")
+                done = task_page(key, 1, "已领取")
+                runner.wait_page = Mock(return_value=visit_fixture("gold-venue"))
+                runner.return_list = Mock(return_value=ready)
+                runner.perceive = Mock(return_value=done)
+                self.assertIs(runner.execute_alipay(before, only=(key, 1)), done)
+                sleep.assert_called_once_with(seconds + 1)
+                self.assertEqual([call.args[0].get("text") for call in runner.adb.tap.call_args_list],
+                                 ["去完成", "领取"])
+                self.assertEqual(runner.results[0]["key"], key)
+
+    def test_claim_completed_task_without_execution_handler(self):
+        """列表上可领的陌生任务只点一次领奖按钮，并确认状态变化。"""
+        def unknown_task(button):
+            xml = ET.tostring(task_page("gold_visit", 1, button).root, encoding="unicode")
+            return Page(xml.replace("逛支付宝金豆夺宝", "合种/帮帮种多人施肥"),
+                        APPS["alipay"]["package"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            runner = Runner(Mock(), Path(directory), 10, app="alipay")
+            ready, done = unknown_task("领取"), unknown_task("已领取")
+            runner.perceive = Mock(return_value=done)
+            self.assertIs(runner.execute_alipay(ready, only=("reward:合种/帮帮种多人施肥", 1)), done)
+            runner.adb.tap.assert_called_once_with(ready.task_rows()[0]["button"])
+            self.assertEqual(runner.results[0]["button_after"], "已领取")
+
+    @patch("farm.time.sleep")
     def test_all_three_routes_return_verify_and_claim(self, sleep):
         """回放各自的真实目的页，必须完成进度核验后才调用领奖流程。"""
         for key in ("home_farm", "gold_visit", "home_gold"):
